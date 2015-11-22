@@ -107,7 +107,7 @@ fetch (DBH env dbi _) key = do
                 return Nothing
         Just (MDB_val size ptr)  -> do
             fptr <- newForeignPtr_ ptr
-            let commitTransaction = do putStrLn "Finalizing (fetch)" 
+            let commitTransaction = do -- putStrLn "Finalizing (fetch)" 
                                        mdb_txn_commit txn
             addForeignPtrFinalizer fptr commitTransaction 
             mdb_txn_commit txn
@@ -127,11 +127,8 @@ store (DBH env dbi writeflags) key val = do
 
 dumpToList :: DBHandle -> IO [(ByteString, ByteString)]
 dumpToList (DBH env dbi _) = do
-    putStrLn "REACHED2.5"
     txn <- mdb_txn_begin env Nothing False
-    putStrLn "REACHED3"
     cursor <- mdb_cursor_open txn dbi
-    putStrLn "REACHED4"
     ref <- newMVar 0
     let finalizer = do
             modifyMVar_ ref (return . subtract 1) -- (\x -> (x,x-1)) 
@@ -140,7 +137,6 @@ dumpToList (DBH env dbi _) = do
                 mdb_txn_commit txn
     xs <- unfoldWhileM (\(_,b) -> b) $ alloca $ \pkey -> alloca $ \pval -> do
         bFound <- mdb_cursor_get MDB_NEXT cursor pkey pval 
-        putStrLn "REACHED5"
         if bFound 
             then do
                 MDB_val klen kp <- peek pkey
