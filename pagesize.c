@@ -4,7 +4,7 @@
 #ifdef _WIN32
 #include <windows.h>
 
-long getPageSize () {
+long getPageSizeKV () {
   SYSTEM_INFO si;
   getSystemInfo(&si);
   return si.dwPageSize;
@@ -14,7 +14,7 @@ long getPageSize () {
 #include <unistd.h>
 
 
-long getPageSize () {
+long getPageSizeKV () {
 	return sysconf(_SC_PAGESIZE);
 }
 #endif
