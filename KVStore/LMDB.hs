@@ -80,10 +80,11 @@ shutDownDBS (DBS env _)= mdb_env_close env
 
 internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
 internalOpenDB flags (DBS env _) name = do 
-    txn <- mdb_txn_begin env Nothing False
-    db <- mdb_dbi_open txn (Just (S.unpack name)) flags
-    mdb_txn_commit txn
-    return $ DBH env db (compileWriteFlags [])
+    bracket (mdb_txn_begin env Nothing False)
+            (mdb_txn_commit)
+            $ \txn -> do
+                 db <- mdb_dbi_open txn (Just (S.unpack name)) flags
+                 return $ DBH env db (compileWriteFlags [])
 
 createDB ::  DBS -> ByteString -> IO DBHandle
 createDB = internalOpenDB [MDB_CREATE]
