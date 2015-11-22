@@ -33,7 +33,6 @@ import Control.Concurrent.MVar
 
 data DBS = DBS { dbEnv :: MDB_env
                , dbDir :: FilePath
-               , dbTid :: ThreadId
                }
 data DBHandle = DBH { dbhEnv :: MDB_env
                     , dbhDBI :: MDB_dbi 
@@ -42,7 +41,7 @@ data DBHandle = DBH { dbhEnv :: MDB_env
 withDBSDo :: FilePath -> (DBS -> IO a) -> IO a
 withDBSDo dir action = bracket (initDBS dir) shutDownDBS action
 
-foreign import ccall getPageSize :: CULong
+foreign import ccall getPageSizeKV :: CULong
 
 initDBS :: FilePath -> IO DBS
 initDBS dir = do
@@ -57,7 +56,7 @@ initDBS dir = do
     -- the haskell bindings take an Int, so I just use maxBound::Int
     space <- getAvailSpace dir
     let pagesize :: Int
-        pagesize = fromIntegral $ getPageSize
+        pagesize = fromIntegral $ getPageSizeKV
         mapsize1  = maxBound - rem maxBound pagesize
         mapsize2  = fromIntegral $ space - rem (space - (500*1024)) (fromIntegral pagesize)
         mapsize  = min mapsize1 mapsize2
@@ -73,16 +72,15 @@ initDBS dir = do
     mdb_env_set_maxdbs env 10 
 
     mdb_env_open env dir [{-todo?(options)-}]
-    return (DBS env dir tid)
+    return (DBS env dir)
 
 shutDownDBS :: DBS -> IO ()
-shutDownDBS (DBS env _ _)= mdb_env_close env
+shutDownDBS (DBS env _)= mdb_env_close env
 
 internalOpenDB :: [MDB_DbFlag] -> DBS -> String -> IO DBHandle
-internalOpenDB flags (DBS env _ _) name = do 
+internalOpenDB flags (DBS env _) name = do 
     txn <- mdb_txn_begin env Nothing False
     db <- mdb_dbi_open txn (Just name) flags
-    putStrLn " (DEBUG) Closing txn (createDB/openDB)"
     mdb_txn_commit txn
     return $ DBH env db (compileWriteFlags [])
 
@@ -104,13 +102,11 @@ fetch (DBH env dbi _) key = do
                 mdb_get txn dbi $ MDB_val (fromIntegral len) (ptr `plusPtr` offs)
     case mabVal of
         Nothing -> do
-                putStrLn " (DEBUG) Closing txn (fetch)"
                 mdb_txn_commit txn
                 return Nothing
         Just (MDB_val size ptr)  -> do
             fptr <- newForeignPtr_ ptr
             let commitTransaction = do
-                                        putStrLn " (DEBUG) Closing txn (fetch)"
                                         mdb_txn_commit txn
             addForeignPtrFinalizer fptr commitTransaction 
             return . Just $ fromForeignPtr fptr 0  (fromIntegral size)
@@ -124,7 +120,6 @@ store (DBH env dbi writeflags) key val = do
             let key' = MDB_val (fromIntegral klen) (kptr `plusPtr` koff)
                 val' = MDB_val (fromIntegral vlen) (vptr `plusPtr` voff)
             mdb_put writeflags txn dbi key' val'
-    putStrLn " (DEBUG) Closing txn (store)"
     mdb_txn_commit txn
     return b
 
@@ -136,9 +131,7 @@ dumpToList (DBH env dbi _) = do
     let finalizer = do
             modifyMVar_ ref (return . subtract 1) -- (\x -> (x,x-1)) 
             r <- readMVar ref
-            putStr " (DEBUG) Finalize # " >> print r
             when (r <= 0) $ do
-                putStrLn " (DEBUG) Closing transaction (dumpToList)"
                 mdb_txn_commit txn
     xs <- unfoldWhileM (\(_,b) -> b) $ alloca $ \pkey -> alloca $ \pval -> do
         bFound <- mdb_cursor_get MDB_NEXT cursor pkey pval 
