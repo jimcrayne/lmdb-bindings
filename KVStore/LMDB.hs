@@ -16,6 +16,7 @@ import System.FilePath
 import Control.Concurrent (myThreadId, ThreadId(..))
 import Database.LMDB.Raw
 import Data.ByteString.Internal
+import qualified Data.ByteString.Char8 as S
 import Foreign.ForeignPtr hiding (addForeignPtrFinalizer) 
 import Foreign.Concurrent
 import Foreign.Ptr
@@ -64,7 +65,7 @@ initDBS dir = do
 
     -- maxreaders, I chose this arbitrarily.
     -- The vcache package doesn't set it, so I'll comment it out for now
-    -- mdb_env_set_maxreaders env 10000 
+    mdb_env_set_maxreaders env 10000 
 
     -- LDMB is designed to support a small handful of databases.
     -- i choose 10 (arbitarily) as maxdbs
@@ -77,17 +78,17 @@ initDBS dir = do
 shutDownDBS :: DBS -> IO ()
 shutDownDBS (DBS env _)= mdb_env_close env
 
-internalOpenDB :: [MDB_DbFlag] -> DBS -> String -> IO DBHandle
+internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
 internalOpenDB flags (DBS env _) name = do 
     txn <- mdb_txn_begin env Nothing False
-    db <- mdb_dbi_open txn (Just name) flags
+    db <- mdb_dbi_open txn (Just (S.unpack name)) flags
     mdb_txn_commit txn
     return $ DBH env db (compileWriteFlags [])
 
-createDB ::  DBS -> String -> IO DBHandle
+createDB ::  DBS -> ByteString -> IO DBHandle
 createDB = internalOpenDB [MDB_CREATE]
 
-openDB ::  DBS -> String -> IO DBHandle
+openDB ::  DBS -> ByteString -> IO DBHandle
 openDB = internalOpenDB []
 
 closeDB :: DBHandle -> IO ()
@@ -106,9 +107,10 @@ fetch (DBH env dbi _) key = do
                 return Nothing
         Just (MDB_val size ptr)  -> do
             fptr <- newForeignPtr_ ptr
-            let commitTransaction = do
-                                        mdb_txn_commit txn
+            let commitTransaction = do putStrLn "Finalizing (fetch)" 
+                                       mdb_txn_commit txn
             addForeignPtrFinalizer fptr commitTransaction 
+            mdb_txn_commit txn
             return . Just $ fromForeignPtr fptr 0  (fromIntegral size)
 
 store :: DBHandle -> ByteString -> ByteString -> IO Bool
@@ -125,8 +127,11 @@ store (DBH env dbi writeflags) key val = do
 
 dumpToList :: DBHandle -> IO [(ByteString, ByteString)]
 dumpToList (DBH env dbi _) = do
+    putStrLn "REACHED2.5"
     txn <- mdb_txn_begin env Nothing False
+    putStrLn "REACHED3"
     cursor <- mdb_cursor_open txn dbi
+    putStrLn "REACHED4"
     ref <- newMVar 0
     let finalizer = do
             modifyMVar_ ref (return . subtract 1) -- (\x -> (x,x-1)) 
@@ -135,6 +140,7 @@ dumpToList (DBH env dbi _) = do
                 mdb_txn_commit txn
     xs <- unfoldWhileM (\(_,b) -> b) $ alloca $ \pkey -> alloca $ \pval -> do
         bFound <- mdb_cursor_get MDB_NEXT cursor pkey pval 
+        putStrLn "REACHED5"
         if bFound 
             then do
                 MDB_val klen kp <- peek pkey
@@ -148,6 +154,6 @@ dumpToList (DBH env dbi _) = do
                          ,fromForeignPtr fvp 0 (fromIntegral vlen) ) ], bFound)
             else return ([], bFound)
     mdb_cursor_close cursor
-    -- mdb_txn_commit txn
+    mdb_txn_commit txn
     return $ concatMap fst xs
 
