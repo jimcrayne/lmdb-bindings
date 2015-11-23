@@ -114,6 +114,17 @@ fetch (DBH env dbi _) key = do
             mdb_txn_commit txn
             return . Just $ fromForeignPtr fptr 0  (fromIntegral size)
 
+delete :: DBHandle -> ByteString -> IO Bool
+delete (DBH env dbi writeflags) key = do
+    bracket (mdb_txn_begin env Nothing False)
+            (mdb_txn_commit)
+            $ \txn -> do
+                mabVal <- withForeignPtr fornptr $ \ptr ->
+                    mdb_get txn dbi $ MDB_val (fromIntegral len) (ptr `plusPtr` offs)
+                maybe (return ()) 
+                      (\val -> mdb_del txn dbi key val)
+                      mabVal
+
 store :: DBHandle -> ByteString -> ByteString -> IO Bool
 store (DBH env dbi writeflags) key val = do
     txn <- mdb_txn_begin env Nothing False
