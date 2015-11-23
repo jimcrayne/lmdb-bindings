@@ -8,6 +8,9 @@ module KVStore.LMDB
     , openDB
     , closeDB
     , fetch
+    , lengthDB
+    , dropDB
+    , delete
     , store
     , dumpToList
     ) where
@@ -114,15 +117,34 @@ fetch (DBH env dbi _) key = do
             mdb_txn_commit txn
             return . Just $ fromForeignPtr fptr 0  (fromIntegral size)
 
+lengthDB (DBH env dbi writeflags) = 
+    bracket 
+            (mdb_txn_begin env Nothing False)
+            (mdb_txn_commit)
+            $ \txn -> fmap ms_entries $ mdb_stat txn dbi
+
+dropDB (DBH env dbi writeflags) = 
+    bracket 
+            (mdb_txn_begin env Nothing False)
+            (mdb_txn_commit)
+            $ \txn -> mdb_drop txn dbi
+
 delete :: DBHandle -> ByteString -> IO Bool
 delete (DBH env dbi writeflags) key = do
-    bracket (mdb_txn_begin env Nothing False)
+    bracket 
+            (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
             $ \txn -> do
-                mabVal <- withForeignPtr fornptr $ \ptr ->
-                    mdb_get txn dbi $ MDB_val (fromIntegral len) (ptr `plusPtr` offs)
-                maybe (return ()) 
-                      (\val -> mdb_del txn dbi key val)
+                let (fornptr,offs,len) = toForeignPtr key
+                mabVal <- withForeignPtr fornptr $ \ptr -> do
+                    let key' = MDB_val (fromIntegral len) (ptr `plusPtr` offs)
+                    mdb_get txn dbi key'
+                maybe (return False) 
+                      (\val -> do
+                                let (fornptr',offs',len') = toForeignPtr key
+                                withForeignPtr fornptr $ \ptr' ->
+                                    let key' = MDB_val (fromIntegral len') (ptr' `plusPtr` offs')
+                                        in mdb_del txn dbi key' (Just val))
                       mabVal
 
 store :: DBHandle -> ByteString -> ByteString -> IO Bool
