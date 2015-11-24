@@ -44,6 +44,7 @@ import Control.Concurrent.MVar
 -- to your "LMDB Database Environment".
 data DBS = DBS { dbEnv :: MDB_env
                , dbDir :: FilePath
+               , dbsIsOpen :: MVar Bool
                }
 
 -- | DBHandle
@@ -54,9 +55,11 @@ data DBS = DBS { dbEnv :: MDB_env
 -- This is an opaque type, but internally it contains a reference to an environment
 -- so functions dealing with databases do not need to pass an environment handle 
 -- (DBS type) as an explicit parameter.
-data DBHandle = DBH { dbhEnv :: MDB_env
+data DBHandle = DBH { dbhEnv :: (MDB_env, MVar Bool)
                     , dbhDBI :: MDB_dbi 
-                    , compiledWriteFlags :: MDB_WriteFlags}
+                    , compiledWriteFlags :: MDB_WriteFlags
+                    , dbhIsOpen :: MVar Bool
+                    }
 
 -- | withDBSDo 
 --
@@ -111,22 +114,32 @@ initDBS dir = do
     mdb_env_set_maxdbs env 10 
 
     mdb_env_open env dir [{-todo?(options)-}]
-    return (DBS env dir)
+    isopen <- newMVar True
+    return (DBS env dir isopen)
 
 -- | shutDownDBS environment 
 --
 -- Shutdown whatever engines were previously started in order
 -- to access the set of databases represented by 'environment'.
 shutDownDBS :: DBS -> IO ()
-shutDownDBS (DBS env _)= mdb_env_close env
+shutDownDBS (DBS env dir emvar)= do
+    open <- readMVar emvar
+    when open $ do
+        modifyMVar_ emvar (return . const False)
+        mdb_env_close env
 
 internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
-internalOpenDB flags (DBS env _) name = do 
+internalOpenDB flags (DBS env dir eMvar) name = do 
     bracket (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
             $ \txn -> do
-                 db <- mdb_dbi_open txn (Just (S.unpack name)) flags
-                 return $ DBH env db (compileWriteFlags [])
+                 eOpen <- readMVar eMvar
+                 if eOpen
+                  then do
+                     db <- mdb_dbi_open txn (Just (S.unpack name)) flags
+                     isopen <- newMVar True
+                     return $ DBH (env,eMvar) db (compileWriteFlags []) isopen
+                  else error ("Cannot open '" ++ S.unpack name ++ "' due to environment being shutdown.") 
 
 -- createDB db name
 -- Opens the specified named database, creating one if it does not exist.
@@ -141,7 +154,15 @@ openDB = internalOpenDB []
 -- | closeDB db name
 -- Close the database.
 closeDB :: DBHandle -> IO ()
-closeDB (DBH env dbi writeflags) = mdb_dbi_close env dbi
+closeDB (DBH (env,eMvar) dbi writeflags mvar) = do
+    eOpen <- readMVar eMvar
+    if eOpen
+      then do
+        dbisopen <- readMVar mvar
+        when (dbisopen) $ do
+            modifyMVar_ mvar (return . const False)
+            mdb_dbi_close env dbi
+      else error ("Cannot close database due to environment being already shutdown.") 
 
 
 -- | unsafeFetch dbhandle key - lookup a key in the database
@@ -168,7 +189,7 @@ closeDB (DBH env dbi writeflags) = mdb_dbi_close env dbi
 --      3) the provided finalizer was called
 --
 unsafeFetch :: DBHandle -> ByteString -> IO (Maybe (ByteString, IO()) )
-unsafeFetch (DBH env dbi _) key = do
+unsafeFetch (DBH (env,eMvar) dbi _ mvar) key = do
     txn <- mdb_txn_begin env Nothing False
     let (fornptr,offs,len) = toForeignPtr key
     mabVal <- withForeignPtr fornptr $ \ptr -> 
@@ -180,19 +201,22 @@ unsafeFetch (DBH env dbi _) key = do
         Just (MDB_val size ptr)  -> do
             fptr <- newForeignPtr_ ptr
             let commitTransaction = do putStrLn ("(DEBUG) Finalizing (fetch " ++ S.unpack key ++")")
-                                       mdb_txn_commit txn
+                                       oEnv <- readMVar eMvar
+                                       when oEnv $ do
+                                           oDB <- readMVar mvar
+                                           when oDB $ mdb_txn_commit txn
             addForeignPtrFinalizer fptr commitTransaction 
             return . Just $ (fromForeignPtr fptr 0  (fromIntegral size), finalizeForeignPtr fptr)
 
 -- | lengthDB db - returns the number of (key,value) entries in provided database.
-lengthDB (DBH env dbi writeflags) = 
+lengthDB (DBH (env,_) dbi writeflags mvar) =  -- todo check mvars
     bracket 
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
             $ \txn -> fmap ms_entries $ mdb_stat txn dbi
 
 -- | drop db - delete a database
-dropDB (DBH env dbi writeflags) = 
+dropDB (DBH (env,_) dbi writeflags mvar) =  -- todo check mvars
     bracket 
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
@@ -203,7 +227,7 @@ dropDB (DBH env dbi writeflags) =
 -- Delete the key in the database. Return False if 
 -- the key is not found.
 delete :: DBHandle -> ByteString -> IO Bool
-delete (DBH env dbi writeflags) key = do
+delete (DBH (env,_) dbi writeflags mvar) key = do --todo check environment mvar
     bracket 
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
@@ -224,7 +248,7 @@ delete (DBH env dbi writeflags) key = do
 -- Store a key-value pair in the database. Returns False
 -- if the key already existed.
 store :: DBHandle -> ByteString -> ByteString -> IO Bool
-store (DBH env dbi writeflags) key val = 
+store (DBH (env,_) dbi writeflags _) key val =  -- todo check mvars
     bracket 
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit) $ \txn ->
@@ -264,7 +288,7 @@ store (DBH env dbi writeflags) key val =
 --      3) the provided finalizer was called
 --
 unsafeDumpToList :: DBHandle -> IO ([(ByteString, ByteString)],IO ())
-unsafeDumpToList (DBH env dbi _) = do
+unsafeDumpToList (DBH (env,emvar) dbi _ mvar) = do
     txn <- mdb_txn_begin env Nothing False
     cursor <- mdb_cursor_open txn dbi
     ref <- newMVar (0::Int)
@@ -273,10 +297,17 @@ unsafeDumpToList (DBH env dbi _) = do
             r <- readMVar ref
             putStrLn ("(DEBUG) Finalizing #" ++ show r)
             when (r == 0) $ do
-                mdb_txn_commit txn
+                oEnv <- readMVar emvar
+                when oEnv $ do
+                   oDB <- readMVar mvar
+                   when oDB $ mdb_txn_commit txn
         finalizeAll = do
            putStrLn "(DEBUG) finalizeAll"
            modifyMVar_ ref (return . const (-1)) 
+           oEnv <- readMVar emvar
+           oDB <- readMVar mvar
+           when (not oDB || not oEnv) $ 
+            error "ERROR finalizer returned from unsafeDumpToList was manually called after closeDB/shutDownDBS."
            mdb_txn_commit txn
     xs <- unfoldWhileM (\(_,b) -> b) $ alloca $ \pkey -> alloca $ \pval -> do
         bFound <- mdb_cursor_get MDB_NEXT cursor pkey pval 
