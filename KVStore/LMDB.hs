@@ -7,12 +7,12 @@ module KVStore.LMDB
     , createDB
     , openDB
     , closeDB
-    , fetch
+    , unsafeFetch
     , lengthDB
     , dropDB
     , delete
     , store
-    , dumpToList
+    , unsafeDumpToList
     ) where
 
 import System.FilePath
@@ -35,18 +35,53 @@ import Data.IORef
 import Control.Concurrent.MVar
 
 
+-- | DBS
+--
+-- The acronym 'DBS' stands for Database System.  The idea is we have a generic
+-- handle for initializing and closing down your database system regardless of
+-- whether it is actually MySQL or LDMB or whatever. In the language of LMDB,
+-- this is called an "environment", and this type can be thought of as a handle
+-- to your "LMDB Database Environment".
 data DBS = DBS { dbEnv :: MDB_env
                , dbDir :: FilePath
                }
+
+-- | DBHandle
+--
+-- Unlike DBS, this is a handle to one specific database within the environment.
+-- Here, "Database" means a simple key-value store, and nothing more grand.
+--
+-- This is an opaque type, but internally it contains a reference to an environment
+-- so functions dealing with databases do not need to pass an environment handle 
+-- (DBS type) as an explicit parameter.
 data DBHandle = DBH { dbhEnv :: MDB_env
                     , dbhDBI :: MDB_dbi 
                     , compiledWriteFlags :: MDB_WriteFlags}
 
+-- | withDBSDo 
+--
+--      dir - directory containing data.mdb, or an
+--            existing empty directory if creating
+--            a new environment
+--
+--      action - function which takes a DBS and preforms
+--               various operations on it's contained 
+--               databases.
+--
+-- Shorthand for @bracket (initDBS dir) shutDownDBS action@
 withDBSDo :: FilePath -> (DBS -> IO a) -> IO a
 withDBSDo dir action = bracket (initDBS dir) shutDownDBS action
 
 foreign import ccall getPageSizeKV :: CULong
 
+-- | initDBS
+--
+--      dir - directory containing data.mdb, or an
+--            existing empty directory if creating
+--            a new environment
+--
+-- Start up and initialize whatever engine(s) provide access to the 
+-- environment specified by the given path. 
 initDBS :: FilePath -> IO DBS
 initDBS dir = do
     tid <- myThreadId
@@ -78,6 +113,10 @@ initDBS dir = do
     mdb_env_open env dir [{-todo?(options)-}]
     return (DBS env dir)
 
+-- | shutDownDBS environment 
+--
+-- Shutdown whatever engines were previously started in order
+-- to access the set of databases represented by 'environment'.
 shutDownDBS :: DBS -> IO ()
 shutDownDBS (DBS env _)= mdb_env_close env
 
@@ -89,18 +128,47 @@ internalOpenDB flags (DBS env _) name = do
                  db <- mdb_dbi_open txn (Just (S.unpack name)) flags
                  return $ DBH env db (compileWriteFlags [])
 
+-- createDB db name
+-- Opens the specified named database, creating one if it does not exist.
 createDB ::  DBS -> ByteString -> IO DBHandle
 createDB = internalOpenDB [MDB_CREATE]
 
+-- | openDB db name
+-- Open a named database.
 openDB ::  DBS -> ByteString -> IO DBHandle
 openDB = internalOpenDB []
 
+-- | closeDB db name
+-- Close the database.
 closeDB :: DBHandle -> IO ()
 closeDB (DBH env dbi writeflags) = mdb_dbi_close env dbi
 
 
-fetch :: DBHandle -> ByteString -> IO (Maybe ByteString)
-fetch (DBH env dbi _) key = do
+-- | unsafeFetch dbhandle key - lookup a key in the database
+--
+--      dbhandle - Database in which to perform lookup
+--      key      - key to look up
+--
+-- IF the key is not found, then return Nothing, otherwise
+-- return Just (value,finalizer) where:
+--
+--      value     - ByteString backed by ForiegnPtr whose finalizer
+--                  commits the transaction
+--      finalizer - IO action which commits the transaction. Call it only if
+--                  you are sure the ByteString is no longer needed. 
+--                  NOTE: GHC will commit the transaction anyway, so it isn't 
+--                  necessary to ever call this at all.
+--
+-- Warning: The ByteString is backed by a ForeignPtr which will become
+-- invalid when the transaction is committed. Be sure it is not accessed
+-- in any of the following 3 scenarios:
+--
+--      1) the environment is closed  (after call to 'shutDownDBS')
+--      2) the database is closed (after call to 'closeDB')
+--      3) the provided finalizer was called
+--
+unsafeFetch :: DBHandle -> ByteString -> IO (Maybe (ByteString, IO()) )
+unsafeFetch (DBH env dbi _) key = do
     txn <- mdb_txn_begin env Nothing False
     let (fornptr,offs,len) = toForeignPtr key
     mabVal <- withForeignPtr fornptr $ \ptr -> 
@@ -111,24 +179,29 @@ fetch (DBH env dbi _) key = do
                 return Nothing
         Just (MDB_val size ptr)  -> do
             fptr <- newForeignPtr_ ptr
-            let commitTransaction = do -- putStrLn "Finalizing (fetch)" 
+            let commitTransaction = do putStrLn ("(DEBUG) Finalizing (fetch " ++ S.unpack key ++")")
                                        mdb_txn_commit txn
             addForeignPtrFinalizer fptr commitTransaction 
-            mdb_txn_commit txn
-            return . Just $ fromForeignPtr fptr 0  (fromIntegral size)
+            return . Just $ (fromForeignPtr fptr 0  (fromIntegral size), finalizeForeignPtr fptr)
 
+-- | lengthDB db - returns the number of (key,value) entries in provided database.
 lengthDB (DBH env dbi writeflags) = 
     bracket 
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
             $ \txn -> fmap ms_entries $ mdb_stat txn dbi
 
+-- | drop db - delete a database
 dropDB (DBH env dbi writeflags) = 
     bracket 
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
             $ \txn -> mdb_drop txn dbi
 
+-- | delete db key 
+--
+-- Delete the key in the database. Return False if 
+-- the key is not found.
 delete :: DBHandle -> ByteString -> IO Bool
 delete (DBH env dbi writeflags) key = do
     bracket 
@@ -147,28 +220,64 @@ delete (DBH env dbi writeflags) key = do
                                         in mdb_del txn dbi key' (Just val))
                       mabVal
 
+-- | store db key value
+-- Store a key-value pair in the database. Returns False
+-- if the key already existed.
 store :: DBHandle -> ByteString -> ByteString -> IO Bool
-store (DBH env dbi writeflags) key val = do
-    txn <- mdb_txn_begin env Nothing False
-    let (kp,koff,klen) = toForeignPtr key
-        (vp,voff,vlen) = toForeignPtr val
-    b <- withForeignPtr kp $ \kptr -> withForeignPtr vp $ \vptr -> do
-            let key' = MDB_val (fromIntegral klen) (kptr `plusPtr` koff)
-                val' = MDB_val (fromIntegral vlen) (vptr `plusPtr` voff)
-            mdb_put writeflags txn dbi key' val'
-    mdb_txn_commit txn
-    return b
+store (DBH env dbi writeflags) key val = 
+    bracket 
+            (mdb_txn_begin env Nothing False)
+            (mdb_txn_commit) $ \txn ->
+        let (kp,koff,klen) = toForeignPtr key
+            (vp,voff,vlen) = toForeignPtr val
+            in withForeignPtr kp $ \kptr -> withForeignPtr vp $ \vptr -> do
+                let key' = MDB_val (fromIntegral klen) (kptr `plusPtr` koff)
+                    val' = MDB_val (fromIntegral vlen) (vptr `plusPtr` voff)
+                mdb_put writeflags txn dbi key' val'
 
-dumpToList :: DBHandle -> IO [(ByteString, ByteString)]
-dumpToList (DBH env dbi _) = do
+-- | unsafeDumpToList 
+--
+--      db - Database
+--    
+-- Returns (kvs,finalize):
+--
+--      kvs - a lazy association list of ByteStrings with the (key,value)-
+--            pairs from `db`
+--
+--      finalize - action which commits the transaction. Call it only if
+--                 you are sure the ByteStrings are no longer needed. 
+--                 NOTE: GHC will commit the transaction anyway, so it isn't 
+--                 necessary to ever call this at all.
+--
+-- Ordinarily, the transaction remains open until all ForeignPtr's are
+-- finalized. If you are concerned that an open transaction is a waste
+-- of resources and that GHC will not finalize the strings promptly,
+-- then you may use the provided finalizer to close the transaction
+-- immediately.
+--
+-- Warning: ByteStrings are backed by ForeignPtr's which become invalid when
+-- the transaction is committed. Be sure they are not accessed in any of the
+-- following 3 scenarios:
+--
+--      1) the environment is closed 
+--      2) the database is closed
+--      3) the provided finalizer was called
+--
+unsafeDumpToList :: DBHandle -> IO ([(ByteString, ByteString)],IO ())
+unsafeDumpToList (DBH env dbi _) = do
     txn <- mdb_txn_begin env Nothing False
     cursor <- mdb_cursor_open txn dbi
-    ref <- newMVar 0
+    ref <- newMVar (0::Int)
     let finalizer = do
             modifyMVar_ ref (return . subtract 1) -- (\x -> (x,x-1)) 
             r <- readMVar ref
-            when (r <= 0) $ do
+            putStrLn ("(DEBUG) Finalizing #" ++ show r)
+            when (r == 0) $ do
                 mdb_txn_commit txn
+        finalizeAll = do
+           putStrLn "(DEBUG) finalizeAll"
+           modifyMVar_ ref (return . const (-1)) 
+           mdb_txn_commit txn
     xs <- unfoldWhileM (\(_,b) -> b) $ alloca $ \pkey -> alloca $ \pval -> do
         bFound <- mdb_cursor_get MDB_NEXT cursor pkey pval 
         if bFound 
@@ -184,6 +293,5 @@ dumpToList (DBH env dbi _) = do
                          ,fromForeignPtr fvp 0 (fromIntegral vlen) ) ], bFound)
             else return ([], bFound)
     mdb_cursor_close cursor
-    mdb_txn_commit txn
-    return $ concatMap fst xs
+    return $ (concatMap fst xs,finalizeAll)
 
