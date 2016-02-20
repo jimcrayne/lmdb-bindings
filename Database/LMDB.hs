@@ -1,5 +1,5 @@
 
-module KVStore.LMDB
+module Database.LMDB
     ( DBS
     , withDBSDo
     , initDBS
