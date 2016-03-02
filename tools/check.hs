@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-import Test.QuickCheck
+-- import Test.QuickCheck
 import Database.LMDB.Raw
 import Database.LMDB
 import Control.Monad
@@ -38,8 +38,8 @@ initGlobalEnv = withSystemTempDirectory0 "checkLMDBXXXX" $ \dir -> do
                 
                 putStrLn "dir exists." 
                 writeFile (dir </> "A" ) "TEMPR" 
-                xs <- listDirectory dir
-                print xs
+                -- xs <- listDirectory dir
+                -- print xs
                 --pid <- runCommand ("caja " ++ dir)
                 --exitC <- waitForProcess pid
                 --printf "exitC=%s\n" (show exitC)
@@ -54,14 +54,14 @@ withGlobal = bracket (readMVar globalDBS ) shutDownDBS
 withTable1 = bracket (readMVar globalDBS >>= flip openDupDB "table1") closeDB 
 
 -- | 'prop_always' always succeeds, just testing my quickcheck understanding
-prop_always = forAll (arbitrary :: Gen Int) (const True)
+-- prop_always = forAll (arbitrary :: Gen Int) (const True)
 
 
-runTests = $quickCheckAll
+-- runTests = $quickCheckAll
 main = do
     initGlobalEnv 
     getLine
-    void runTests 
+    -- void runTests 
     dbs <- readMVar globalDBS
     withTable1 $ \db -> do
         store db "key" "This"
@@ -70,9 +70,13 @@ main = do
         store db "key" "be"
         store db "key" "in"
         store db "key" "order."
+    putStrLn "Environments:"
+    listEnv >>= print
+    putStr " 1 isOpen : " >> isOpenEnv "DBFOLDER" >>= print
     shutDownDBS dbs
     putStrLn "Closing dbs ..."
     threadDelay 2000
+    putStr " 2 isOpen : " >> isOpenEnv "DBFOLDER" >>= print
     newdbs <- openDBS dbs
     modifyMVar_ globalDBS (const . return $ newdbs)
     withTable1 $ \db -> do

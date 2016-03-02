@@ -1,8 +1,12 @@
-
+{-# LANGUAGE AutoDeriveTypeable #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Database.LMDB
     ( DBS
     , withDBSDo
     , initDBS
+    , isOpenEnv
+    , listEnv
     , openDBS
     , shutDownDBS 
     , createDB
@@ -34,10 +38,25 @@ import Control.Exception
 import System.DiskSpace
 import Foreign.Storable
 import Control.Monad
+import Control.Applicative
 import Control.Monad.Loops
 import Foreign.Marshal.Alloc
 import Data.IORef
 import Control.Concurrent.MVar
+import Data.Global
+import qualified Data.HashTable.IO as H
+import Data.String
+import Data.Typeable
+import qualified Data.HashTable.Class as Class
+import qualified Data.HashTable.ST.Basic as Basic
+-- import Control.Monad.Primitive
+import Control.Monad.Extra
+
+newtype HTable s k v = HT (Basic.HashTable s k v) deriving Typeable
+
+type HashTable k v = H.IOHashTable HTable k v
+
+deriving instance Class.HashTable (HTable)
 
 
 -- | DBS
@@ -50,7 +69,7 @@ import Control.Concurrent.MVar
 data DBS = DBS { dbEnv :: MDB_env
                , dbDir :: FilePath
                , dbsIsOpen :: MVar Bool
-               }
+               } -- deriving Typeable
 
 -- | DBHandle
 --
@@ -82,6 +101,24 @@ withDBSDo dir action = bracket (initDBS dir) shutDownDBS action
 
 foreign import ccall getPageSizeKV :: CULong
 
+isOpenEnv dir = do
+    h <- H.new :: IO (HashTable S.ByteString DBS)
+    let registryMVar = declareMVar "LMDB registry" h
+    registry <- readMVar registryMVar 
+    result <- H.lookup registry dir 
+    case result of
+        Nothing -> return False
+        Just (DBS _ _ mvar) -> readMVar mvar
+
+listEnv = do
+    h <- H.new :: IO (HashTable S.ByteString DBS)
+    let registryMVar = declareMVar "LMDB registry" h
+    registry <- readMVar registryMVar 
+    es <- H.toList registry 
+    (stillOpen,closed) <- partitionM (readMVar . dbsIsOpen . snd) es
+    mapM_ (H.delete registry . fst) closed
+    return $ map fst stillOpen
+
 -- | initDBS
 --
 --      dir - directory containing data.mdb, or an
@@ -92,35 +129,62 @@ foreign import ccall getPageSizeKV :: CULong
 -- environment specified by the given path. 
 initDBS :: FilePath -> IO DBS
 initDBS dir = do
-    tid <- myThreadId
-    env <- mdb_env_create 
+    h <- H.new :: IO (HashTable S.ByteString DBS)
+    let registryMVar = declareMVar "LMDB registry" h
+    registry <- takeMVar registryMVar -- lock registry
+    mbAlreadyOpen <- H.lookup registry (fromString dir)
+    case mbAlreadyOpen of
+        Just dbs@(DBS env _ mvar) -> do
+            isOpen <- readMVar mvar
+            if isOpen then do 
+                        putMVar registryMVar registry -- unlock registry
+                        return dbs
+                      else do
+                        (env',_) <- newEnv dir (Just mvar)
+                        putMVar registryMVar registry -- unlock registry
+                        return (dbs {dbEnv = env' })
+        Nothing -> do
+            (env',mvar') <- newEnv dir Nothing
+            let retv = DBS env' dir mvar'
+            H.insert registry (fromString dir) retv
+            putMVar registryMVar registry -- unlock registry
+            return retv
+    where
+        newEnv dir maybeMVar = do
+            tid <- myThreadId
+            env <- mdb_env_create 
 
-    -- I tried to ask for pagesize, but it segfaults
-    -- stat <- mdb_env_stat env 
-    -- putStrLn "InitDBS after stat"
+            -- I tried to ask for pagesize, but it segfaults
+            -- stat <- mdb_env_stat env 
+            -- putStrLn "InitDBS after stat"
 
-    -- mapsize can be very large, but should be a multiple of pagesize
-    -- the haskell bindings take an Int, so I just use maxBound::Int
-    space <- getAvailSpace dir
-    let pagesize :: Int
-        pagesize = fromIntegral $ getPageSizeKV
-        mapsize1  = maxBound - rem maxBound pagesize
-        mapsize2  = fromIntegral $ space - rem (space - (500*1024)) (fromIntegral pagesize)
-        mapsize  = min mapsize1 mapsize2
-    mdb_env_set_mapsize env mapsize
+            -- mapsize can be very large, but should be a multiple of pagesize
+            -- the haskell bindings take an Int, so I just use maxBound::Int
+            space <- getAvailSpace dir
+            let pagesize :: Int
+                pagesize = fromIntegral $ getPageSizeKV
+                mapsize1  = maxBound - rem maxBound pagesize
+                mapsize2  = fromIntegral $ space - rem (space - (500*1024)) (fromIntegral pagesize)
+                mapsize  = min mapsize1 mapsize2
+            mdb_env_set_mapsize env mapsize
 
-    -- maxreaders, I chose this arbitrarily.
-    -- The vcache package doesn't set it, so I'll comment it out for now
-    mdb_env_set_maxreaders env 10000 
+            -- maxreaders, I chose this arbitrarily.
+            -- The vcache package doesn't set it, so I'll comment it out for now
+            mdb_env_set_maxreaders env 10000 
 
-    -- LDMB is designed to support a small handful of databases.
-    -- i choose 10 (arbitarily) as maxdbs
-    -- The vcache package uses 5
-    mdb_env_set_maxdbs env 10 
+            -- LDMB is designed to support a small handful of databases.
+            -- i choose 10 (arbitarily) as maxdbs
+            -- The vcache package uses 5
+            mdb_env_set_maxdbs env 10 
 
-    mdb_env_open env dir [{-todo?(options)-}]
-    isopen <- newMVar True
-    return (DBS env dir isopen)
+            mdb_env_open env dir [{-todo?(options)-}]
+            case maybeMVar of
+                Nothing -> do
+                    isopen <- newMVar True
+                    return (env, isopen)
+                Just mvar -> do
+                    modifyMVar_ mvar (const $ return True) 
+                    return (env, mvar)
 
 
 -- | openDBS - shouldn't really need this

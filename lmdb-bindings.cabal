@@ -24,6 +24,9 @@ library
                 , filepath
                 , disk-free-space
                 , monad-loops
+                , global-variables
+                , hashtables
+                , extra
   build-tools: hsc2hs
   c-sources: pagesize.c
   exposed-modules:
