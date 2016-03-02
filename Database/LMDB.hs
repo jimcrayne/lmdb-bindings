@@ -6,6 +6,10 @@ module Database.LMDB
     , shutDownDBS 
     , createDB
     , openDB
+    , createDupsortDB
+    , createDupDB
+    , openDupsortDB
+    , openDupDB
     , closeDB
     , unsafeFetch
     , lengthDB
@@ -117,6 +121,15 @@ initDBS dir = do
     isopen <- newMVar True
     return (DBS env dir isopen)
 
+{-
+openDBS x@(DBS env dir isopenmvar) = do
+    isopen <- readMVar isopenmvar
+    when (not isopen) $ do
+        mdb_env_open env dir [{-todo?(options)-}]
+        modifyMVar_ isopenmvar (\_ -> return True)
+    return x
+-}
+
 -- | shutDownDBS environment 
 --
 -- Shutdown whatever engines were previously started in order
@@ -146,10 +159,42 @@ internalOpenDB flags (DBS env dir eMvar) name = do
 createDB ::  DBS -> ByteString -> IO DBHandle
 createDB = internalOpenDB [MDB_CREATE]
 
+-- createDupsortDB db name
+-- Like 'createDB' but the database is flagged DUPSORT
+createDupsortDB ::  DBS -> ByteString -> IO DBHandle
+createDupsortDB = internalOpenDB [MDB_CREATE, MDB_DUPSORT]
+
+-- createDupDB db name
+-- Like 'createDupsortDB' but the data comparison function is set to always return 1
+createDupDB ::  DBS -> ByteString -> IO DBHandle
+createDupDB dbs name = do
+    handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB [MDB_CREATE, MDB_DUPSORT] dbs name
+    compare <- wrapCmpFn (\_ _ -> return 1)
+    bracket (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_set_dupsort txn dbi compare)
+    return handle
+
 -- | openDB db name
 -- Open a named database.
 openDB ::  DBS -> ByteString -> IO DBHandle
 openDB = internalOpenDB []
+
+-- | openDupsortDB db name
+-- Like 'openDB' but DUPSORT specified.
+openDupsortDB ::  DBS -> ByteString -> IO DBHandle
+openDupsortDB = internalOpenDB [MDB_DUPSORT]
+
+-- openDupDB db name
+-- Like 'openDupsortDB' but the data comparison function is set to always return 1
+openDupDB ::  DBS -> ByteString -> IO DBHandle
+openDupDB dbs name = do
+    handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB [MDB_DUPSORT] dbs name
+    compare <- wrapCmpFn (\_ _ -> return 1)
+    bracket (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_set_dupsort txn dbi compare)
+    return handle
 
 -- | closeDB db name
 -- Close the database.
