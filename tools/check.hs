@@ -6,6 +6,7 @@ import Database.LMDB.Raw
 import Database.LMDB
 import Control.Monad
 import Control.Concurrent.MVar
+import Control.Concurrent
 import Control.Exception (bracket)
 import System.IO.Unsafe
 
@@ -39,9 +40,9 @@ initGlobalEnv = withSystemTempDirectory0 "checkLMDBXXXX" $ \dir -> do
                 writeFile (dir </> "A" ) "TEMPR" 
                 xs <- listDirectory dir
                 print xs
-                pid <- runCommand ("caja " ++ dir)
-                exitC <- waitForProcess pid
-                printf "exitC=%s\n" (show exitC)
+                --pid <- runCommand ("caja " ++ dir)
+                --exitC <- waitForProcess pid
+                --printf "exitC=%s\n" (show exitC)
                 getPermissions dir >>= print
                 p <- canonicalizePath dir
                 print p
@@ -69,6 +70,11 @@ main = do
         store db "key" "be"
         store db "key" "in"
         store db "key" "order."
+    shutDownDBS dbs
+    putStrLn "Closing dbs ..."
+    threadDelay 2000
+    newdbs <- openDBS dbs
+    modifyMVar_ globalDBS (const . return $ newdbs)
     withTable1 $ \db -> do
         store db "key" "And"
         store db "key" "this"

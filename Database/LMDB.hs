@@ -3,6 +3,7 @@ module Database.LMDB
     ( DBS
     , withDBSDo
     , initDBS
+    , openDBS
     , shutDownDBS 
     , createDB
     , openDB
@@ -121,14 +122,23 @@ initDBS dir = do
     isopen <- newMVar True
     return (DBS env dir isopen)
 
-{-
+
+-- | openDBS - shouldn't really need this
+--
+--  NOT RECOMMENDED. This is a no op in the 
+--  case the environment is open, otherwise
+--  it calls 'initDBS'. Normally use 'withDBS'
+--  or 'initDBS' and don't shut down until program
+--  terminates.
+openDBS :: DBS -> IO DBS
 openDBS x@(DBS env dir isopenmvar) = do
     isopen <- readMVar isopenmvar
-    when (not isopen) $ do
-        mdb_env_open env dir [{-todo?(options)-}]
-        modifyMVar_ isopenmvar (\_ -> return True)
-    return x
--}
+    if (not isopen) 
+        then do
+            putStrLn ("OPENING dbs: " ++ dir)
+            initDBS dir
+        else return x
+
 
 -- | shutDownDBS environment 
 --
@@ -136,23 +146,26 @@ openDBS x@(DBS env dir isopenmvar) = do
 -- to access the set of databases represented by 'environment'.
 shutDownDBS :: DBS -> IO ()
 shutDownDBS (DBS env dir emvar)= do
-    open <- readMVar emvar
-    when open $ do
-        modifyMVar_ emvar (return . const False)
-        mdb_env_close env
+    open <- takeMVar emvar
+    if open 
+        then do
+            --modifyMVar_ emvar (return . const False)
+            mdb_env_close env
+            putMVar emvar False
+        else putMVar emvar open
 
 internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
 internalOpenDB flags (DBS env dir eMvar) name = do 
-    bracket (mdb_txn_begin env Nothing False)
-            (mdb_txn_commit)
-            $ \txn -> do
-                 eOpen <- readMVar eMvar
-                 if eOpen
-                  then do
-                     db <- mdb_dbi_open txn (Just (S.unpack name)) flags
-                     isopen <- newMVar True
-                     return $ DBH (env,eMvar) db (compileWriteFlags []) isopen
-                  else error ("Cannot open '" ++ S.unpack name ++ "' due to environment being shutdown.") 
+    e <- readMVar eMvar
+    if e 
+       then bracket (mdb_txn_begin env Nothing False)
+                    (mdb_txn_commit)
+                    $ \txn -> do
+                             db <- mdb_dbi_open txn (Just (S.unpack name)) flags
+                             isopen <- newMVar True
+                             return $ DBH (env,eMvar) db (compileWriteFlags []) isopen
+       else isShutdown 
+    where isShutdown = error ("Cannot open '" ++ S.unpack name ++ "' due to environment being shutdown.") 
 
 -- createDB db name
 -- Opens the specified named database, creating one if it does not exist.
@@ -170,10 +183,15 @@ createDupDB ::  DBS -> ByteString -> IO DBHandle
 createDupDB dbs name = do
     handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB [MDB_CREATE, MDB_DUPSORT] dbs name
     compare <- wrapCmpFn (\_ _ -> return 1)
-    bracket (mdb_txn_begin env Nothing False)
+    bracketIfOpen mvar0 (mdb_txn_begin env Nothing False)
             mdb_txn_commit
             (\txn -> mdb_set_dupsort txn dbi compare)
     return handle
+
+bracketIfOpen mvar init close action = do
+    b <- readMVar mvar
+    if b then (bracket init close action)
+         else (error "bracketIfOpen")
 
 -- | openDB db name
 -- Open a named database.
@@ -191,7 +209,7 @@ openDupDB ::  DBS -> ByteString -> IO DBHandle
 openDupDB dbs name = do
     handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB [MDB_DUPSORT] dbs name
     compare <- wrapCmpFn (\_ _ -> return 1)
-    bracket (mdb_txn_begin env Nothing False)
+    bracketIfOpen mvar0 (mdb_txn_begin env Nothing False)
             mdb_txn_commit
             (\txn -> mdb_set_dupsort txn dbi compare)
     return handle
@@ -272,8 +290,8 @@ dropDB (DBH (env,_) dbi writeflags mvar) =  -- todo check mvars
 -- Delete the key in the database. Return False if 
 -- the key is not found.
 delete :: DBHandle -> ByteString -> IO Bool
-delete (DBH (env,_) dbi writeflags mvar) key = do --todo check environment mvar
-    bracket 
+delete (DBH (env,mv0) dbi writeflags mvar) key = do --todo check environment mvar
+    bracketIfOpen mv0
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit)
             $ \txn -> do
@@ -293,8 +311,8 @@ delete (DBH (env,_) dbi writeflags mvar) key = do --todo check environment mvar
 -- Store a key-value pair in the database. Returns False
 -- if the key already existed.
 store :: DBHandle -> ByteString -> ByteString -> IO Bool
-store (DBH (env,_) dbi writeflags _) key val =  -- todo check mvars
-    bracket 
+store (DBH (env,mv0) dbi writeflags _) key val =  -- todo check mvars
+    bracketIfOpen mv0
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit) $ \txn ->
         let (kp,koff,klen) = toForeignPtr key
