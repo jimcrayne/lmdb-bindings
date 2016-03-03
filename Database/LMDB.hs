@@ -3,10 +3,10 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Database.LMDB
     ( DBS
+    -- * Public DBS Interface
     , withDBSDo
+    , withDBSCreateIfMissing
     , initDBS
-    , isOpenEnv
-    , listEnv
     , openDBS
     , shutDownDBS 
     , createDB
@@ -16,15 +16,33 @@ module Database.LMDB
     , openDupsortDB
     , openDupDB
     , closeDB
-    , unsafeFetch
     , lengthDB
     , dropDB
     , delete
     , store
+    -- * Internal and/or Unsafe Functions (DBS Interface)
+    , unsafeFetch
+    , internalUnamedDB
     , unsafeDumpToList
+    , unsafeDumpToListOp
+    -- * Query for open environment(s) (Process Globals)
+    , isOpenEnv
+    , listEnv
+    -- * Atomic functions using paths, and names only
+    , listTables
+    , listTablesCreateIfMissing
+    , deleteTable
+    , createTable
+    , insertKey
+    , deleteKey
+    , lookupVal
+    , toList
+    , keysOf
+    , valsOf
     ) where
 
 import System.FilePath
+import System.Directory
 import Control.Concurrent (myThreadId, ThreadId(..))
 import Database.LMDB.Raw
 import Data.ByteString.Internal
@@ -51,6 +69,7 @@ import qualified Data.HashTable.Class as Class
 import qualified Data.HashTable.ST.Basic as Basic
 -- import Control.Monad.Primitive
 import Control.Monad.Extra
+import Control.DeepSeq (force)
 
 newtype HTable s k v = HT (Basic.HashTable s k v) deriving Typeable
 
@@ -99,11 +118,16 @@ data DBHandle = DBH { dbhEnv :: (MDB_env, MVar Bool)
 withDBSDo :: FilePath -> (DBS -> IO a) -> IO a
 withDBSDo dir action = bracket (initDBS dir) shutDownDBS action
 
+
+withDBSCreateIfMissing dir action = do
+    createDirectoryIfMissing True dir
+    withDBSDo dir action
+
 foreign import ccall getPageSizeKV :: CULong
 
 isOpenEnv dir = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
-    let registryMVar = declareMVar "LMDB registry" h
+    let registryMVar = declareMVar "LMDB Environments" h
     registry <- readMVar registryMVar 
     result <- H.lookup registry dir 
     case result of
@@ -112,7 +136,7 @@ isOpenEnv dir = do
 
 listEnv = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
-    let registryMVar = declareMVar "LMDB registry" h
+    let registryMVar = declareMVar "LMDB Environments" h
     registry <- readMVar registryMVar 
     es <- H.toList registry 
     (stillOpen,closed) <- partitionM (readMVar . dbsIsOpen . snd) es
@@ -130,7 +154,7 @@ listEnv = do
 initDBS :: FilePath -> IO DBS
 initDBS dir = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
-    let registryMVar = declareMVar "LMDB registry" h
+    let registryMVar = declareMVar "LMDB Environments" h
     registry <- takeMVar registryMVar -- lock registry
     mbAlreadyOpen <- H.lookup registry (fromString dir)
     case mbAlreadyOpen of
@@ -230,6 +254,20 @@ internalOpenDB flags (DBS env dir eMvar) name = do
                              return $ DBH (env,eMvar) db (compileWriteFlags []) isopen
        else isShutdown 
     where isShutdown = error ("Cannot open '" ++ S.unpack name ++ "' due to environment being shutdown.") 
+
+internalUnamedDB ::  DBS -> IO DBHandle
+internalUnamedDB (DBS env dir eMvar) = do 
+    e <- readMVar eMvar
+    if e 
+       then bracket (mdb_txn_begin env Nothing False)
+                    (mdb_txn_commit)
+                    $ \txn -> do
+                             db <- mdb_dbi_open txn Nothing flags
+                             isopen <- newMVar True
+                             return $ DBH (env,eMvar) db (compileWriteFlags []) isopen
+       else isShutdown 
+    where isShutdown = error ("Cannot open unamed db due to environment being shutdown.") 
+          flags = []
 
 -- createDB db name
 -- Opens the specified named database, creating one if it does not exist.
@@ -415,7 +453,10 @@ store (DBH (env,mv0) dbi writeflags _) key val =  -- todo check mvars
 --      3) the provided finalizer was called
 --
 unsafeDumpToList :: DBHandle -> IO ([(ByteString, ByteString)],IO ())
-unsafeDumpToList (DBH (env,emvar) dbi _ mvar) = do
+unsafeDumpToList dbs  = unsafeDumpToListOp MDB_NEXT dbs
+
+unsafeDumpToListOp :: MDB_cursor_op -> DBHandle -> IO ([(ByteString, ByteString)],IO ())
+unsafeDumpToListOp flag (DBH (env,emvar) dbi _ mvar) = do
     txn <- mdb_txn_begin env Nothing False
     cursor <- mdb_cursor_open txn dbi
     ref <- newMVar (0::Int)
@@ -437,7 +478,7 @@ unsafeDumpToList (DBH (env,emvar) dbi _ mvar) = do
             error "ERROR finalizer returned from unsafeDumpToList was manually called after closeDB/shutDownDBS."
            mdb_txn_commit txn
     xs <- unfoldWhileM (\(_,b) -> b) $ alloca $ \pkey -> alloca $ \pval -> do
-        bFound <- mdb_cursor_get MDB_NEXT cursor pkey pval 
+        bFound <- mdb_cursor_get flag cursor pkey pval 
         if bFound 
             then do
                 MDB_val klen kp <- peek pkey
@@ -453,3 +494,67 @@ unsafeDumpToList (DBH (env,emvar) dbi _ mvar) = do
     mdb_cursor_close cursor
     return $ (concatMap fst xs,finalizeAll)
 
+listTables x = withDBSDo x $ \dbs -> do
+    db <- internalUnamedDB dbs
+    (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
+    let keys = map (S.copy . fst) keysVals
+    force keys `seq` final 
+    return keys
+
+listTablesCreateIfMissing x = withDBSCreateIfMissing x $ \dbs -> do
+    db <- internalUnamedDB dbs
+    (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
+    let keys = map (S.copy . fst) keysVals
+    force keys `seq` final 
+    return keys
+
+deleteTable x n = withDBSDo x $ \dbs -> do
+    DBH (env,_) dbi _ mvar <- openDB dbs n
+    bracket (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_drop txn dbi)
+    
+createTable x n = withDBSCreateIfMissing x $ \dbs -> createDB dbs n
+
+clearTable x n = withDBSDo x $ \dbs -> do
+    DBH (env,_) dbi _ mvar <- openDB dbs n
+    bracket (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_clear txn dbi)
+
+insertKey x n k v = withDBSCreateIfMissing x $ \dbs -> do
+    d <- createDB dbs n
+    store d k v
+
+deleteKey x n k = withDBSDo x $ \dbs -> do
+    d <- openDB dbs n
+    delete d k 
+
+lookupVal x n k = withDBSDo x $ \dbs -> do
+    d <- openDB dbs n
+    mb <- unsafeFetch d k
+    case mb of
+        Just (val,final) -> do
+            force val `seq` final
+            return (Just val)
+        Nothing -> return Nothing
+
+toList x n = withDBSDo x $ \dbs -> do
+    d <- openDB dbs n
+    (xs,final) <- unsafeDumpToList d
+    force xs `seq` final 
+    return xs
+
+keysOf x n = withDBSDo x $ \dbs -> do
+    d <- openDB dbs n
+    (keysVals,final) <- unsafeDumpToList d
+    let keys = map (S.copy . fst) keysVals
+    force keys `seq` final 
+    return keys
+
+valsOf x n = withDBSDo x $ \dbs -> do
+    d <- openDB dbs n
+    (keysVals,final) <- unsafeDumpToList d
+    let vals = map (S.copy . snd) keysVals
+    force vals `seq` final 
+    return vals

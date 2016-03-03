@@ -27,6 +27,8 @@ library
                 , global-variables
                 , hashtables
                 , extra
+                , deepseq
+                , directory
   build-tools: hsc2hs
   c-sources: pagesize.c
   exposed-modules:
@@ -48,3 +50,11 @@ Executable check
                 , process
                 , QuickCheck >= 2.4
   main-is:        check.hs
+
+Executable mdblist
+  Default-Language: Haskell2010
+  build-depends:  lmdb-bindings
+                , base
+                , bytestring
+  hs-source-dirs: tools
+  main-is:        mdblist.hs
