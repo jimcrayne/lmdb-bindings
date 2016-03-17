@@ -1,6 +1,7 @@
 {-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE CPP #-}
 module Database.LMDB
     ( DBS
     -- * Public DBS Interface
@@ -33,6 +34,7 @@ module Database.LMDB
     , listTablesCreateIfMissing
     , deleteTable
     , createTable
+    , clearTable
     , insertKey
     , deleteKey
     , lookupVal
@@ -70,6 +72,13 @@ import qualified Data.HashTable.ST.Basic as Basic
 -- import Control.Monad.Primitive
 import Control.Monad.Extra
 import Control.DeepSeq (force)
+
+dputStrLn :: String -> IO ()
+#ifdef DEBUG
+dputStrLn str = putStrLn ("(DEBUG) " ++ str)
+#else
+dputStrLn str = return ()
+#endif
 
 newtype HTable s k v = HT (Basic.HashTable s k v) deriving Typeable
 
@@ -365,7 +374,7 @@ unsafeFetch (DBH (env,eMvar) dbi _ mvar) key = do
                 return Nothing
         Just (MDB_val size ptr)  -> do
             fptr <- newForeignPtr_ ptr
-            let commitTransaction = do putStrLn ("(DEBUG) Finalizing (fetch " ++ S.unpack key ++")")
+            let commitTransaction = do dputStrLn ("Finalizing (fetch " ++ S.unpack key ++")")
                                        oEnv <- readMVar eMvar
                                        when oEnv $ do
                                            oDB <- readMVar mvar
@@ -463,14 +472,14 @@ unsafeDumpToListOp flag (DBH (env,emvar) dbi _ mvar) = do
     let finalizer = do
             modifyMVar_ ref (return . subtract 1) -- (\x -> (x,x-1)) 
             r <- readMVar ref
-            putStrLn ("(DEBUG) Finalizing #" ++ show r)
+            dputStrLn ("Finalizing #" ++ show r)
             when (r == 0) $ do
                 oEnv <- readMVar emvar
                 when oEnv $ do
                    oDB <- readMVar mvar
                    when oDB $ mdb_txn_commit txn
         finalizeAll = do
-           putStrLn "(DEBUG) finalizeAll"
+           dputStrLn "finalizeAll"
            modifyMVar_ ref (return . const (-1)) 
            oEnv <- readMVar emvar
            oDB <- readMVar mvar
@@ -542,8 +551,10 @@ lookupVal x n k = withDBSDo x $ \dbs -> do
 toList x n = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
     (xs,final) <- unsafeDumpToList d
-    force xs `seq` final 
-    return xs
+    let ys   = map copy xs
+        copy (x,y) = (S.copy x, S.copy y)
+    force ys `seq` final 
+    return ys
 
 keysOf x n = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
