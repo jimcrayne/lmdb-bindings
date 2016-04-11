@@ -24,7 +24,8 @@ usage = let cs =
                , ["lookupKey",path,tbl,key]  
                , ["toList",path,tbl]         
                  -- Variation of toList
-               , ["show",path,tbl]           ]
+               , ["show",path,tbl]
+               , ["show",path]                  ]
             path = "<path>"
             tbl = "<table>"
             key = "<key>"
@@ -40,6 +41,11 @@ main = do
     let u = B.unpack
         v = void
         putPair (x,y) = B.putStrLn (x <> ": " <> y)
+        putPairI n (x,y) = B.putStrLn (B.replicate n ' ' <> x <> ": " <> y)
+        putTbl path tbl = do 
+            putStrLn "---"
+            B.putStr tbl >> putStrLn ":"
+            mapM_ (putPairI 2) =<< toList (u path) tbl
     case args of
         ["listTables",path]         -> mapM_ B.putStrLn =<< listTables (u path)
         ["createTable",path,tbl]    -> v $ createTable (u path) tbl
@@ -53,4 +59,5 @@ main = do
         ["toList",path,tbl]         -> print =<< toList (u path) tbl
         -- Variation of toList
         ["show",path,tbl]           -> mapM_ putPair =<< toList (u path) tbl
+        ["show",path]               -> mapM_ (putTbl path) =<< listTables (u path)
         _ -> usage

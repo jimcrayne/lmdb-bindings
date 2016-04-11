@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                lmdb-bindings
-version:             0.1.0.0
+version:             0.1.1.0
 synopsis:            Persistent Key,Value Store implemented on top of LMDB
 -- description:         
 homepage:            https://github.com/JimCrayne/kvstore-lmdb

@@ -41,6 +41,17 @@ module Database.LMDB
     , toList
     , keysOf
     , valsOf
+    -- * Like the atomic functions, but leaves environment open 
+    , listTables'
+    , deleteTable'
+    , createTable'
+    , clearTable'
+    , insertKey'
+    , deleteKey'
+    , lookupVal'
+    , toList'
+    , keysOf'
+    , valsOf'
     ) where
 
 import System.FilePath
@@ -510,6 +521,12 @@ listTables x = withDBSDo x $ \dbs -> do
     force keys `seq` final 
     return keys
 
+listTables' dbs = bracket (internalUnamedDB dbs) closeDB $ \db -> do
+    (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
+    let keys = map (S.copy . fst) keysVals
+    force keys `seq` final 
+    return keys
+
 listTablesCreateIfMissing x = withDBSCreateIfMissing x $ \dbs -> do
     db <- internalUnamedDB dbs
     (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
@@ -522,11 +539,22 @@ deleteTable x n = withDBSDo x $ \dbs -> do
     bracket (mdb_txn_begin env Nothing False)
             mdb_txn_commit
             (\txn -> mdb_drop txn dbi)
+
+deleteTable' dbs n = bracket (openDB dbs n) closeDB $ \(DBH (env,_) dbi _ mvar) -> 
+    bracket (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_drop txn dbi)
     
 createTable x n = withDBSCreateIfMissing x $ \dbs -> createDB dbs n
+createTable' dbs n = createDB dbs n
 
 clearTable x n = withDBSDo x $ \dbs -> do
     DBH (env,_) dbi _ mvar <- openDB dbs n
+    bracket (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_clear txn dbi)
+
+clearTable' dbs n = bracket (openDB dbs n) closeDB $ \(DBH (env,_) dbi _ mvar) -> 
     bracket (mdb_txn_begin env Nothing False)
             mdb_txn_commit
             (\txn -> mdb_clear txn dbi)
@@ -535,12 +563,24 @@ insertKey x n k v = withDBSCreateIfMissing x $ \dbs -> do
     d <- createDB dbs n
     store d k v
 
+insertKey' dbs n k v = bracket (createDB dbs n) closeDB $ \d -> store d k v
+
 deleteKey x n k = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
     delete d k 
 
+deleteKey' dbs n k = bracket (openDB dbs n) closeDB $ \d -> delete d k
+
 lookupVal x n k = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
+    mb <- unsafeFetch d k
+    case mb of
+        Just (val,final) -> do
+            force val `seq` final
+            return (Just val)
+        Nothing -> return Nothing
+
+lookupVal' dbs n k = bracket (openDB dbs n) closeDB $ \d -> do
     mb <- unsafeFetch d k
     case mb of
         Just (val,final) -> do
@@ -556,6 +596,13 @@ toList x n = withDBSDo x $ \dbs -> do
     force ys `seq` final 
     return ys
 
+toList' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
+    (xs,final) <- unsafeDumpToList d
+    let ys   = map copy xs
+        copy (x,y) = (S.copy x, S.copy y)
+    force ys `seq` final 
+    return ys
+
 keysOf x n = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
     (keysVals,final) <- unsafeDumpToList d
@@ -563,8 +610,20 @@ keysOf x n = withDBSDo x $ \dbs -> do
     force keys `seq` final 
     return keys
 
+keysOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
+    (keysVals,final) <- unsafeDumpToList d
+    let keys = map (S.copy . fst) keysVals
+    force keys `seq` final 
+    return keys
+
 valsOf x n = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
+    (keysVals,final) <- unsafeDumpToList d
+    let vals = map (S.copy . snd) keysVals
+    force vals `seq` final 
+    return vals
+
+valsOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
     (keysVals,final) <- unsafeDumpToList d
     let vals = map (S.copy . snd) keysVals
     force vals `seq` final 
