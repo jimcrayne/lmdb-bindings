@@ -1,7 +1,7 @@
-{-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 module Database.LMDB
     ( DBS
     -- * Public DBS Interface
@@ -108,7 +108,7 @@ deriving instance Class.HashTable (HTable)
 data DBS = DBS { dbEnv :: MDB_env
                , dbDir :: FilePath
                , dbsIsOpen :: MVar Bool
-               } -- deriving Typeable
+               } deriving Typeable
 
 -- | DBHandle
 --
