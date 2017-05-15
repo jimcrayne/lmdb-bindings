@@ -74,14 +74,15 @@ import Control.Monad.Loops
 import Foreign.Marshal.Alloc
 import Data.IORef
 import Control.Concurrent.MVar
-import Data.Global
+-- import Data.Global
+import System.IO.Unsafe
 import qualified Data.HashTable.IO as H
 import Data.String
 import Data.Typeable
 import qualified Data.HashTable.Class as Class
 import qualified Data.HashTable.ST.Basic as Basic
 -- import Control.Monad.Primitive
-import Control.Monad.Extra
+--import Control.Monad.Extra
 import Control.DeepSeq (force)
 
 dputStrLn :: String -> IO ()
@@ -145,6 +146,12 @@ withDBSCreateIfMissing dir action = do
 
 foreign import ccall getPageSizeKV :: CULong
 
+declareMVar "LMDB Environments"  h = _registryMVar
+declareMVar s _ = error ("ERROR: Cannot fectch global MVar named " ++ show s)
+
+{-# NOINLINE _registryMVar #-}
+_registryMVar = unsafePerformIO $ (H.new >>= newMVar) :: MVar (HashTable ByteString DBS)
+
 isOpenEnv dir = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
     let registryMVar = declareMVar "LMDB Environments" h
@@ -162,6 +169,17 @@ listEnv = do
     (stillOpen,closed) <- partitionM (readMVar . dbsIsOpen . snd) es
     mapM_ (H.delete registry . fst) closed
     return $ map fst stillOpen
+    where
+        -- | A version of 'partition' that works with a monadic predicate.
+        --
+        -- > partitionM (Just . even) [1,2,3] == Just ([2], [1,3])
+        -- > partitionM (const Nothing) [1,2,3] == Nothing
+        partitionM :: Monad m => (a -> m Bool) -> [a] -> m ([a], [a])
+        partitionM f [] = return ([], [])
+        partitionM f (x:xs) = do
+            res <- f x
+            (as,bs) <- partitionM f xs
+            return ([x | res]++as, [x | not res]++bs)
 
 -- | initDBS
 --

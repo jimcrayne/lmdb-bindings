@@ -24,9 +24,9 @@ library
                 , filepath
                 , disk-free-space
                 , monad-loops
-                , global-variables
+                --, global-variables
                 , hashtables
-                , extra
+                --, extra
                 , deepseq
                 , directory
   build-tools: hsc2hs
