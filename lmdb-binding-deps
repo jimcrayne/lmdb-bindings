@@ -1,0 +1,29 @@
+transformers-compat-0.5.1.4
+tagged-0.8.5
+hashable-1.2.5.0
+unordered-containers-0.2.7.2
+semigroups-0.18.2
+primitive-0.6.2.0
+tf-random-0.5
+QuickCheck-2.9.2 # QuickCheck >=2.4,
+hourglass-0.2.10
+asn1-encoding-0.9.4 # asn1-encoding ==0.8.*,
+asn1-types-0.3.2 # asn1-types ==0.2.*,
+byteable-0.1.1
+cryptonite-0.21
+cryptohash-0.11.9
+bytestring-arbitrary-0.1.1 # bytestring-arbitrary -any,
+disk-free-space-0.1.0.1 # disk-free-space -any,
+vector-0.12.0.0
+hashtables-1.2.1.0 # hashtables -any,
+foundation-0.0.3
+memory-0.14 # memory -any,
+monad-loops-0.4.3 # monad-loops -any,
+murmur-hash-0.1.0.9 # murmur-hash -any,
+syb-0.6 # syb -any,
+exceptions-0.8.3
+temporary-1.2.0.4 # temporary -any,
+asn1-parse-0.9.4
+base64-bytestring-1.0.0.1
+pem-0.2.2
+x509-1.6.5 # x509 >=1.4.7 && <1.5

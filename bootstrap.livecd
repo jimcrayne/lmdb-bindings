@@ -1,0 +1,16 @@
+#!/bin/bash
+
+DEPS=$(cat lmdb-binding-deps  | sed 's/\(.*\) # .*/\1/')
+PATCHES=$(ls patch.*)
+mkdir -p b
+for each in $PATCHES; do
+	D=$PWD
+	TARG=$(echo ${each:6} | sed 's#\(.*\)\.[^0-9].*#\1#')
+	echo $TARG
+	cp -aR /usr/share/hackage/$TARG b
+	pushd b/$TARG
+	patch -p0 < $D/$each
+	popd
+done
+
+cabal install $(for each in $DEPS ; do if [[ -d b/$each ]]; then echo ./b/$each; else echo /usr/share/hackage/$each; fi; done)
