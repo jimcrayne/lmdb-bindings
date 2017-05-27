@@ -1,3 +1,13 @@
+-- | This module provides two interfaces:
+--
+-- 1. A high-level type-safe interface that abstracts-away the detail that you
+-- are using LMDB.  It should only be used with databases that it was used to
+-- create.  Rather than the LMDB structure, the database is represented as a
+-- collection of mutable references ('DBRef') and mutable lookup tables
+-- ('Single' and 'Multi').
+--
+-- 2. A lower level interface that exposes more of LMDB's features/settings and
+-- allows you to operate on arbitrary LMDB environments.
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE CPP #-}
@@ -9,10 +19,77 @@
 {-# LANGUAGE TemplateHaskell     #-}
 module Database.LMDB
     ( module Database.LMDB.Macros
-    , Period(..)
     , LMDB_Error(..)
+
+    -- * The high-level DB monad interface
+
+    -- ** The Database Evironment
+    , DBEnv -- (..)
+    , openDBEnv
+    , closeDBEnv
+    , runDB
+    , tryDB
+
+    -- ** Specifying a Transaction
+    , DB -- (..)
+    , abort
+    , dbtrace
+    , dblift
+    , transactionTime
+
+    , orElse
+    , cases
+
+    -- ** Named refs
+    , readDBRef
+    , writeDBRef
+
+    -- ** Simple key/value tables
+    , initSingle
+    , testSingle
+    , store
+    , unstore
+    , fetch
+    , fetchByPrefix
+
+    -- ** Tables with multiple values per key
+    , initMulti
+    , testMulti
+    , insert
+    , fetchByPrefixMultiple
+    , fetchMultiple
+
+    -- ** Miscelaneous utilities.
+    , Period(..)
+    , addPeriod
+    , RNG(..)
+    , makeGen
+    , withRNG
+
+    {-
+    -- ** Internal functions
+    , dbError
+    , dbRequiresWrite
+    , dbRequiresStamp
+    , performAtomicIO
+    , buildByteString
+    , withMDB
+    , findForKey
+    , findManyForKey
+    , appendKeyValue
+    , withMDB_
+    , decodeStrict
+    , findMatchHashed
+    , splitKeyChunks
+    , getMany
+    , getManyChunks
+    , dupsortFetch
+    , DBParams(..)
+    -}
+
+    -- * The Low-level DBS Interface
+    -- ** Public interface.
     , DBS
-    -- * Public DBS Interface
     , withDBSDo
     , withDBSCreateIfMissing
     , initDBS
@@ -29,15 +106,15 @@ module Database.LMDB
     , dropDB
     , delete
     , add
-    -- * Internal and/or Unsafe Functions (DBS Interface)
+    -- ** Internal and/or Unsafe Functions (DBS Interface)
     , unsafeFetch
     , internalUnamedDB
     , unsafeDumpToList
     , unsafeDumpToListOp
-    -- * Query for open environment(s) (Process Globals)
+    -- ** Query for open environment(s) (Process Globals)
     , isOpenEnv
     , listEnv
-    -- * Atomic functions using paths, and names only
+    -- * Atomic functions using file paths and names only
     , listTables
     , listTablesCreateIfMissing
     , deleteTable
@@ -49,7 +126,7 @@ module Database.LMDB
     , toList
     , keysOf
     , valsOf
-    -- * Like the atomic functions, but leaves environment open 
+    -- * Like the atomic file path functions, but operates on an open environment
     , listTables'
     , deleteTable'
     , createTable'
@@ -60,53 +137,7 @@ module Database.LMDB
     , toList'
     , keysOf'
     , valsOf'
-    -- * Static Typed Database interface with DBRefs
-    , DB (..)
-    , DBParams(..)
-    , dbRequiresWrite
-    , dbRequiresStamp
-    , transactionTime
-    , addPeriod
-    , dbError
-    , abort
-    , orElse
-    , cases
-    , performAtomicIO
-    , buildByteString
-    , withMDB
-    , findForKey
-    , findManyForKey
-    , appendKeyValue
-    , withMDB_
-    , readDBRef
-    , writeDBRef
-    , decodeStrict
-    , fetch
-    , findMatchHashed
-    , unstore
-    , splitKeyChunks
-    , store
-    , getMany
-    , getManyChunks
-    , fetchMultiple
-    , dupsortFetch
-    , insert
-    , initMulti
-    , initSingle
-    , testMulti
-    , testSingle
-    , DBEnv(..)
-    , openDBEnv
-    , closeDBEnv
-    , runDB
-    , tryDB
-    , RNG(..)
-    , makeGen
-    , withRNG
-    , dbtrace
-    , dblift
-    , fetchByPrefix
-    , fetchByPrefixMultiple
+
     ) where
 
 import System.FilePath
@@ -788,8 +819,18 @@ valsOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
 --
 -- | Monad representing a database transaction
 --
---  The Bool keeps track if any writes occur, otherwise we can
---  us a read-only transaction.
+-- If the user avoids the 'Monad' bind operation and restricts himself
+-- to the 'Applicative' interface, then the following will be automatically
+-- detected:
+--
+--  * whether or not the transaction requires write-access
+--
+--  * whether or not the transaction requires entropy
+--
+--  * whether or not the transaction must be supplied a time-stamp
+--
+-- If '>>=' is used, then 'runDB' will meet all three of those conditions
+-- regardless if they are actually necessary.
 data DB a = DB
     { dbFlags :: !Word8 -- three bit flags, 1 - uses write permission, 2 - uses timestamp, 4 - uses entropy
     , dbOperation :: DBParams -> MDB_txn -> IO (Either LMDB_Error a)
@@ -832,6 +873,8 @@ instance Monad DB where
             Left er -> return $ Left er
             Right aa -> dbOperation (f aa) stamp txn
 
+-- | Obtain a time-stamp for the current transaction.  Note that repeated calls
+-- to this within a single transaction will always return the same value.
 transactionTime :: DB TimeStamp
 transactionTime = DB 2 $ \DBParams {dbtime=stamp} _ -> return $ Right stamp
 
@@ -856,16 +899,17 @@ dbError :: String -> String -> LMDB_Error
 dbError ctx message = LMDB_Error ctx message (Right MDB_INVALID)
 
 
--- Like STM's retry, but with a failure message.
+-- | Like STM\'s 'Control.Monad.STM.retry', but with a failure message.
 abort :: String -> DB a
 abort message = DB 0 $ \_ _ -> return $ Left er
  where
     er = dbError "aborted" message
 
--- orElse needs to use a subtransaction unless the expression
---  is read-only.
+-- | Like STM\'s 'Control.Monad.STM.orElse'
 orElse :: DB a -> DB a -> DB a
 orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
+    -- Note: orElse needs to use a subtransaction unless the expression
+    --  is read-only.
     txn' <- if dbRequiresWrite a
                 then mdbTry $ mdb_txn_begin (mdb_txn_env txn) (Just txn) False
                 else return $ Right txn
@@ -883,10 +927,14 @@ orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
             else either (const $ dbOperation b stamp txn) (return . Right) ea
 
 
--- | Use this to this along with the Applicative interface to create
--- dynamic read-only transactions.  All cases must be handled and they
--- are all examined for write accesses.  If any case would trigger a
--- write access, then the resulting transaction is read/write.
+-- | Use this to this along with the 'Applicative' interface to create dynamic
+-- read-only transactions.  All cases must be handled and they are all examined
+-- for write accesses.  If any case would trigger a write access, then the
+-- resulting transaction is read/write.
+--
+-- To be clear, the purpose here is to allow branching without requiring use of
+-- the 'Monad' bind operation which has documented drawbacks for the 'DB'
+-- monad.
 cases :: forall a x. (Bounded a, Enum a) => DB a -> (a -> DB x) -> DB x
 cases toggle op = DB flags $ \stamp txn -> do
     ei <- dbOperation toggle stamp txn
@@ -980,6 +1028,17 @@ withMDB_ bs action = do
         action (MDB_val (fromIntegral len) (ptr `plusPtr` offset))
 
 
+-- | Read a 'DBRef' value from a database.
+--
+-- If the database is new or this value has never been written, then the
+-- transaction will fail.
+--
+-- A global 'DBRef' can be declared using the template-haskell 'database'
+-- macro.  For example, to decare a boolean reference named "myref", use the
+-- following:
+--
+-- > database [d| myref = xxx :: DBRef Bool |]
+--
 readDBRef :: Binary a => DBRef a -> DB a
 readDBRef (DBRef keyname dbivar) = DB 0 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
@@ -987,6 +1046,11 @@ readDBRef (DBRef keyname dbivar) = DB 0 $ \_ txn -> do
           Right
        <$> withMDB keyname decode (mdb_get txn dbi)
 
+-- | Write a 'DBRef'' value to a database.
+--
+-- If the database is new or this value has never been written, then the
+-- 'DBRef' entry will be created in the database.  See 'readDBRef' for how to
+-- declare a 'DBRef' variable for use with this function.
 writeDBRef :: Binary a => DBRef a -> a -> DB ()
 writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
@@ -1001,6 +1065,8 @@ writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
 decodeStrict :: Binary a => S.ByteString -> a
 decodeStrict = decode . L.fromChunks . (:[])
 
+-- | Lookup a value from a given key using a table created by 'initSingle'.
+-- The transaction will fail if the key does not exist in the table.
 fetch :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v -> k -> DB v
 fetch (Single dbname dbivar) k =
     case flavor (Proxy :: Proxy f) of
@@ -1045,6 +1111,7 @@ findMatchHashed encodedKey cursor pkey pval cursor_opt = do
                 then return $ Just val
                 else findMatchHashed encodedKey cursor pkey pval MDB_NEXT_DUP
 
+-- | Remove a key/value pair from a table that was created with 'initSingle'.
 unstore :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v  -> k -> DB ()
 unstore (Single dbname dbivar) k =
     case flavor (Proxy :: Proxy f) of
@@ -1099,6 +1166,9 @@ splitKeyChunks _ = do
 
 
 
+-- | Store a key/value pair into a table.  If the key already existed, it will
+-- be overwritten.  See 'initSingle' for how to declare a table of type
+-- 'Single'.
 store :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v -> k -> v -> DB ()
 store (Single dbname dbivar) k val =
     case flavor (Proxy :: Proxy f) of
@@ -1266,6 +1336,16 @@ initMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
     _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
     return $ Right ()
 
+-- | Create an empty lookup table within a database.  The table needs to be
+-- declared using the 'database' template-haskell macro.  For example,
+--
+-- database [d| freshness = xxx :: Single 'HashedKey RawCertificate Int64 |]
+--
+-- The above example would declare a variable "freshness" that refers to a
+-- table that obtains 64-bit integer values given a value of type
+-- 'RawCertificate'.  The 'HashedKey' 'DBFlavor' indicates that keys will
+-- actually be hashed for efficency of lookups and to work-around LMDB's
+-- hard-coded maximum length.
 initSingle :: forall f k v. FlavorKind f => Single f k v -> DB ()
 initSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
     let flags = case flavor (Proxy :: Proxy f) of
@@ -1284,6 +1364,11 @@ testMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
     _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
     return $ Right ()
 
+-- | Fail the transaction if the specified table does not exist.  See
+-- 'initSingle' for how to declare a table using the 'database' macro.
+--
+-- This method is handy for validating a database is ready to use with your
+-- application without having to go to the trouble of attempting a 'fetch'.
 testSingle :: forall f k v. FlavorKind f => Single f k v -> DB ()
 testSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
     -- TODO: Should we handle exception and return Left ?
@@ -1302,8 +1387,21 @@ mdbTry action = handle (return . Left)
                        (fmap Right action)
 
 
+-- | An opague type representing an open database.
 data DBEnv = DBEnv MDB_env (MVar RNG)
 
+-- | Open a database.  The current design is limited in that data represented
+-- by 'DBRef', 'Single', and 'Multi' are assumed to be associated with only a
+-- single active 'DBEnv' so care must be taken if multiple databases are
+-- opened.
+--
+-- The 'Maybe' argument indicates a path to a "noise" file which is used to
+-- seed a pseudo-RNG en lieu of using true system entropy for the 'MonadRandom'
+-- interface of the 'DB' transactions.  This is useful for making tests
+-- reproducable.
+--
+-- Note that it is neccessary to invoke 'closeDBEnv' to flush writes and
+-- clean-up when you are finished with the database.
 openDBEnv :: FilePath -> Maybe FilePath -> IO DBEnv
 openDBEnv path mbnoise = do
         -- TODO Handle LMDB_Error exception?
@@ -1338,20 +1436,30 @@ openDBEnv path mbnoise = do
         return $ DBEnv env gv
 
 
+-- | Close a database.
 closeDBEnv :: DBEnv -> IO ()
 closeDBEnv (DBEnv env _) = do
     _ <- mdbTry $ mdb_env_close env
     return ()
 
 
+-- | Run a single atomic transaction on an open database.  If something goes
+-- wrong, an 'LMDB_Error' value will be returned.
 runDB :: (NFData a, Data a) => DBEnv -> DB a -> IO (Either LMDB_Error a)
 runDB env action = tryDB env Left Right action
 
 
+-- | 'runDB' is implemented using this lower-level interface.  It handles the
+-- error and success cases before returning to the caller.  The arguments are
+-- as follows:
 --
--- onError - compute result when transaction fails.
--- onSuccess - compute result on bytestring-evacuated result of transaction.
--- db_action - transaction (with pre-evacuation computations done via fmap).
+--  [ onError ]   - compute result when transaction fails.
+--
+--  [ onSuccess ] - compute result on bytestring-evacuated result of
+--  transaction.
+--
+--  [ db_action ] - transaction (with pre-evacuation computations done via
+--  fmap).
 --
 tryDB :: (NFData a, Data a) => DBEnv -> (LMDB_Error -> x) -> (a -> x) -> DB a -> IO x
 tryDB (DBEnv env gv) onError onSuccess db_action = do
@@ -1422,12 +1530,20 @@ withRNG f = DB 4 $ \DBParams { dbRNG=rngv } _ -> do
     a <- modifyMVar rngv (return . swap . f)
     return $ Right a
 
+-- | Output a debug message.
 dbtrace :: String -> DB ()
 dbtrace str = DB 0 $ \_ _ -> putStrLn str >> return (Right ())
 
+-- | Perform an IO action from within a transaction.  Note that this is unsafe
+-- and very bad practice. It is provided mainly for temporary hacks and
+-- debuging.  This function is effectively 'Control.Monad.IO.Class.liftIO' for
+-- the 'DB' monad.
 dblift :: IO a -> DB a
 dblift action = DB 0 $ \_ _ -> fmap Right action
 
+-- | This fetches multiple key/value pairs from a table created by
+-- 'initSingle'.  The given 'S.ByteString' is a common prefix of the serialized
+-- keys whose values are of interest.
 fetchByPrefix :: forall f k v. (Eq k, Binary k, Binary v) => Single 'BoundedKey k v -> S.ByteString -> DB [(k,v)]
 fetchByPrefix (Single dbname dbivar) start  = DB 0 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
