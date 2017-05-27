@@ -64,12 +64,12 @@ main = do
     -- void runTests 
     dbs <- readMVar globalDBS
     withTable1 $ \db -> do
-        store db "key" "This"
-        store db "key" "should"
-        store db "key" "still"
-        store db "key" "be"
-        store db "key" "in"
-        store db "key" "order."
+        add db "key" "This"
+        add db "key" "should"
+        add db "key" "still"
+        add db "key" "be"
+        add db "key" "in"
+        add db "key" "order."
     putStrLn "Environments:"
     listEnv >>= print
     putStr " 1 isOpen : " >> isOpenEnv "DBFOLDER" >>= print
@@ -80,9 +80,9 @@ main = do
     newdbs <- openDBS dbs
     modifyMVar_ globalDBS (const . return $ newdbs)
     withTable1 $ \db -> do
-        store db "key" "And"
-        store db "key" "this"
-        store db "key" "follows."
+        add db "key" "And"
+        add db "key" "this"
+        add db "key" "follows."
     withTable1 $ \db -> do
         (kvs,finalize) <- unsafeDumpToList db
         mapM_ (print . snd) kvs

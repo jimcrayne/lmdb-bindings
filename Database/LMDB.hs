@@ -2,8 +2,16 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveFunctor       #-}
+{-# LANGUAGE KindSignatures      #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
 module Database.LMDB
-    ( DBS
+    ( module Database.LMDB.Macros
+    , Period(..)
+    , LMDB_Error(..)
+    , DBS
     -- * Public DBS Interface
     , withDBSDo
     , withDBSCreateIfMissing
@@ -20,7 +28,7 @@ module Database.LMDB
     , lengthDB
     , dropDB
     , delete
-    , store
+    , add
     -- * Internal and/or Unsafe Functions (DBS Interface)
     , unsafeFetch
     , internalUnamedDB
@@ -52,6 +60,53 @@ module Database.LMDB
     , toList'
     , keysOf'
     , valsOf'
+    -- * Static Typed Database interface with DBRefs
+    , DB (..)
+    , DBParams(..)
+    , dbRequiresWrite
+    , dbRequiresStamp
+    , transactionTime
+    , addPeriod
+    , dbError
+    , abort
+    , orElse
+    , cases
+    , performAtomicIO
+    , buildByteString
+    , withMDB
+    , findForKey
+    , findManyForKey
+    , appendKeyValue
+    , withMDB_
+    , readDBRef
+    , writeDBRef
+    , decodeStrict
+    , fetch
+    , findMatchHashed
+    , unstore
+    , splitKeyChunks
+    , store
+    , getMany
+    , getManyChunks
+    , fetchMultiple
+    , dupsortFetch
+    , insert
+    , initMulti
+    , initSingle
+    , testMulti
+    , testSingle
+    , DBEnv(..)
+    , openDBEnv
+    , closeDBEnv
+    , runDB
+    , tryDB
+    , RNG(..)
+    , makeGen
+    , withRNG
+    , dbtrace
+    , dblift
+    , fetchByPrefix
+    , fetchByPrefixMultiple
     ) where
 
 import System.FilePath
@@ -84,6 +139,86 @@ import qualified Data.HashTable.ST.Basic as Basic
 -- import Control.Monad.Primitive
 --import Control.Monad.Extra
 import Control.DeepSeq (force)
+
+
+-- Imports from Joe's interface
+-- no attempt to remove redundancy
+import           Control.Exception
+import qualified Control.Concurrent.STM as STM
+import Control.Concurrent.STM.TVar
+import Control.Concurrent.MVar
+import Control.Monad
+import Database.LMDB.Raw
+import Control.Applicative
+import Control.DeepSeq
+import           System.DiskSpace                  (getAvailSpace)
+import Data.Data
+import Data.Traversable (Traversable, traverse)
+import Data.List (foldl1',partition)
+-- import qualified Data.ByteString                   as S
+import qualified Data.ByteString.Char8 as Char8
+import qualified Data.ByteString.Internal          as S
+import qualified Data.ByteString.Lazy as L
+import Data.Int
+import Data.Binary
+import Data.Binary.Get
+import Data.Binary.Put
+import Data.Bits
+#ifdef NOHOURGLASS
+import Data.Time -- UTCTime
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime,utcTimeToPOSIXSeconds)
+#else
+import Foreign.C.Types (CTime(..))
+import Data.Hourglass (Period(..))
+import qualified Data.Hourglass as Hourglass
+import qualified System.Hourglass as Hourglass
+#endif
+import Data.Tuple
+import Data.Word
+import Data.Maybe
+import Control.DeepSeq
+import qualified Data.Generics.Aliases             as Generics
+import qualified Data.Generics.Schemes             as Generics
+import           Foreign.C.Types                   (CSize, CULong (..))
+-- import           Foreign.ForeignPtr
+import qualified Foreign.Concurrent
+import           Foreign.Ptr
+import System.IO.Unsafe (unsafePerformIO)
+import Data.Global.Internal
+import Language.Haskell.TH
+import qualified Data.Digest.Murmur64 as Murmur
+#if MIN_VERSION_base(4,8,0)
+import Foreign.Marshal hiding (void)
+#else
+import Foreign.Marshal.Safe hiding (void)
+#endif
+import Foreign.Storable
+import           System.IO.Unsafe                  (unsafeInterleaveIO)
+import Database.LMDB.Macros
+import Database.LMDB.Raw.Types
+import Crypto.Random
+import Control.Arrow (second, (***))
+
+#ifdef NOHOURGLASS
+type TimeStamp = UTCTime
+data Period = Period { peroidYears :: !Int
+                     , periodMonths :: !Int
+                     , peroidDays :: !Int
+                     }
+toSeconds :: TimeStamp -> Int64
+toSeconds utc = round $ utcTimeToPOSIXSeconds utc
+
+fromSeconds :: Int64 -> TimeStamp
+fromSeconds s = posixSecondsToUTCTime (realToFrac s)
+#else
+type TimeStamp = Hourglass.DateTime
+toSeconds :: TimeStamp -> Int64
+toSeconds vincentTime = t
+  where (Hourglass.Elapsed (Hourglass.Seconds t)) = Hourglass.timeGetElapsed vincentTime
+fromSeconds :: Int64 -> TimeStamp
+fromSeconds t = Hourglass.timeFromElapsed (Hourglass.Elapsed (Hourglass.Seconds t))
+#endif
+
 
 dputStrLn :: String -> IO ()
 #ifdef DEBUG
@@ -447,11 +582,11 @@ delete (DBH (env,mv0) dbi writeflags mvar) key = do --todo check environment mva
                                         in mdb_del txn dbi key' (Just val))
                       mabVal
 
--- | store db key value
+-- | add db key value
 -- Store a key-value pair in the database. Returns False
 -- if the key already existed.
-store :: DBHandle -> ByteString -> ByteString -> IO Bool
-store (DBH (env,mv0) dbi writeflags _) key val =  -- todo check mvars
+add :: DBHandle -> ByteString -> ByteString -> IO Bool
+add (DBH (env,mv0) dbi writeflags _) key val =  -- todo check mvars
     bracketIfOpen mv0
             (mdb_txn_begin env Nothing False)
             (mdb_txn_commit) $ \txn ->
@@ -579,9 +714,9 @@ clearTable' dbs n = bracket (openDB dbs n) closeDB $ \(DBH (env,_) dbi _ mvar) -
 
 insertKey x n k v = withDBSCreateIfMissing x $ \dbs -> do
     d <- createDB dbs n
-    store d k v
+    add d k v
 
-insertKey' dbs n k v = bracket (createDB dbs n) closeDB $ \d -> store d k v
+insertKey' dbs n k v = bracket (createDB dbs n) closeDB $ \d -> add d k v
 
 deleteKey x n k = withDBSDo x $ \dbs -> do
     d <- openDB dbs n
@@ -646,3 +781,721 @@ valsOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
     let vals = map (S.copy . snd) keysVals
     force vals `seq` final 
     return vals
+
+
+------------------------------------------
+--  Static Typed Database Interface
+--
+-- | Monad representing a database transaction
+--
+--  The Bool keeps track if any writes occur, otherwise we can
+--  us a read-only transaction.
+data DB a = DB
+    { dbFlags :: !Word8 -- three bit flags, 1 - uses write permission, 2 - uses timestamp, 4 - uses entropy
+    , dbOperation :: DBParams -> MDB_txn -> IO (Either LMDB_Error a)
+    }
+ deriving Functor
+
+data DBParams = DBParams
+    { dbtime :: TimeStamp
+    , dbRNG :: MVar RNG
+    }
+
+
+dbRequiresWrite :: DB a -> Bool
+dbRequiresWrite a = dbFlags a .&. 1 /= 0
+
+dbRequiresStamp :: DB a -> Bool
+dbRequiresStamp a = dbFlags a .&. 2 /= 0
+
+instance Applicative DB where
+    pure x = DB 0 $ \_ _ -> return $ Right x
+    f <*> a = DB (dbFlags f .|. dbFlags a) $ \stamp txn -> do
+        ef <- dbOperation f stamp txn
+        case ef of
+            Left er -> return $ Left er
+            Right ff -> do
+                ea <- dbOperation a stamp txn
+                case ea of
+                    Left er -> return $ Left er
+                    Right aa -> return $ Right $ ff aa
+
+instance Monad DB where
+    return x = pure x
+    a >> b = fmap (flip const) a <*> b
+
+    -- The monad >>= operation forces use of a read/write transaction.
+    -- Use the Applicative interface for read-only.
+    a >>= f = DB 7 $ \stamp txn -> do
+        ea <- dbOperation a stamp txn
+        case ea of
+            Left er -> return $ Left er
+            Right aa -> dbOperation (f aa) stamp txn
+
+transactionTime :: DB TimeStamp
+transactionTime = DB 2 $ \DBParams {dbtime=stamp} _ -> return $ Right stamp
+
+addPeriod :: TimeStamp -> Period -> TimeStamp
+addPeriod now period =
+#ifdef NOHOURGLASS
+    let now' = utcToLocalTime utc now
+        day0 = localDay now'
+        Period y m d = period
+        day1 = addDays (fromIntegral d)
+                $ addGregorianMonthsClip (fromIntegral m)
+                $ addGregorianYearsClip (fromIntegral y) day0
+        end_stamp = localTimeToUTC utc (now' { localDay = day1 })
+#else
+    let end_date = Hourglass.dateAddPeriod (Hourglass.dtDate now) period -- Period years months days
+        end_stamp = Hourglass.DateTime end_date $ Hourglass.dtTime now
+#endif
+    in end_stamp
+
+
+dbError :: String -> String -> LMDB_Error
+dbError ctx message = LMDB_Error ctx message (Right MDB_INVALID)
+
+
+-- Like STM's retry, but with a failure message.
+abort :: String -> DB a
+abort message = DB 0 $ \_ _ -> return $ Left er
+ where
+    er = dbError "aborted" message
+
+-- orElse needs to use a subtransaction unless the expression
+--  is read-only.
+orElse :: DB a -> DB a -> DB a
+orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
+    txn' <- if dbRequiresWrite a
+                then mdbTry $ mdb_txn_begin (mdb_txn_env txn) (Just txn) False
+                else return $ Right txn
+    either (return . Left) (withTxn stamp txn) txn'
+ where
+    -- TODO: Do we need to handle LMDB_Error exceptions here?
+    withTxn stamp txn txn' = do
+        ea <- dbOperation a stamp txn'
+        if dbRequiresWrite a
+            then case ea of
+                    Left _ -> do mdb_txn_abort txn'
+                                 dbOperation b stamp txn
+                    Right x -> do mdb_txn_commit txn'
+                                  return $ Right x
+            else either (const $ dbOperation b stamp txn) (return . Right) ea
+
+
+-- | Use this to this along with the Applicative interface to create
+-- dynamic read-only transactions.  All cases must be handled and they
+-- are all examined for write accesses.  If any case would trigger a
+-- write access, then the resulting transaction is read/write.
+cases :: forall a x. (Bounded a, Enum a) => DB a -> (a -> DB x) -> DB x
+cases toggle op = DB flags $ \stamp txn -> do
+    ei <- dbOperation toggle stamp txn
+    either (return . Left) (\a -> dbOperation (op a) stamp txn) ei
+ where
+    flags = foldl1' (.|.) $ map (dbFlags . op) posibilities
+    posibilities = [minBound .. maxBound] :: [a]
+
+
+performAtomicIO :: TVar (Pending a) -> IO a -> IO a
+performAtomicIO var action = do
+    getdatum <- STM.atomically $ do
+        progress <- readTVar var
+        case progress of
+            NotStarted -> do
+                writeTVar var Pending
+                return $ do
+                    datum <- action
+                    STM.atomically $ writeTVar var (Completed datum)
+                    return datum
+            Pending -> STM.retry
+            Completed datum -> return $ return datum
+    getdatum
+
+
+
+buildByteString :: MDB_val -> IO S.ByteString
+buildByteString (MDB_val size ptr) = do
+    fptr <- newForeignPtr_ ptr
+    return $ S.fromForeignPtr fptr 0 (fromIntegral size)
+
+-- arguments:
+--
+-- [ bs ]     Input bytestring to argument: action.
+--
+-- [ decode ] Post-process each result of action.
+--
+-- [ action ] Operation on MDB_val to container of MDB_vals.
+--
+-- Note: Any lazy-IO is destroyed here by invoking 'traverse'.
+withMDB :: forall f a. Traversable f => S.ByteString -> (L.ByteString -> a) -> (MDB_val -> IO (f MDB_val)) -> IO (f a)
+withMDB bs decode action = do
+    let (fptr,offset,len) = S.toForeignPtr bs
+    withForeignPtr fptr $ \ptr -> do
+        mb <- action (MDB_val (fromIntegral len) (ptr `plusPtr` offset))
+        traverse decodeMDB mb
+ where
+    decodeMDB :: MDB_val -> IO a
+    decodeMDB (MDB_val len ptr) = do
+        fptr <- newForeignPtr_ ptr
+        return $ decode $ L.fromChunks [S.fromForeignPtr fptr 0 (fromIntegral len)]
+
+findForKey :: (Eq k, Binary k, Binary v) => k -> Get (Maybe v)
+findForKey k = do
+    nil <- isEmpty
+    if nil
+     then return Nothing
+     else do
+        storedk <- get
+        vlen <- getWord32le
+        if storedk /= k
+            then do skip (fromIntegral vlen)
+                    done <- isEmpty
+                    if not done then findForKey k
+                                else return Nothing
+            else Just <$> get
+
+findManyForKey :: (Eq k, Binary k, Binary v) => k -> Get [v]
+findManyForKey k = do
+    m <- findForKey k
+    fromMaybe (return []) $ do
+        x <- m
+        Just $ do
+            xs <- findManyForKey k
+            return (x:xs)
+
+appendKeyValue :: (Binary k, Binary v) => L.ByteString -> k -> v -> L.ByteString
+appendKeyValue bs k v = bs `L.append` kv
+ where
+    kv = runPut $ do
+            put k
+            putWord32le vlen
+            putLazyByteString bv
+    bv = runPut $ put v
+    vlen = fromIntegral $ L.length bv
+
+withMDB_ :: S.ByteString -> (MDB_val -> IO a) -> IO a
+withMDB_ bs action = do
+    let (fptr,offset,len) = S.toForeignPtr bs
+    withForeignPtr fptr $ \ptr -> do
+        action (MDB_val (fromIntegral len) (ptr `plusPtr` offset))
+
+
+readDBRef :: Binary a => DBRef a -> DB a
+readDBRef (DBRef keyname dbivar) = DB 0 $ \_ txn -> do
+    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    maybe (Left $ dbError "readDBRef" "bad reference")
+          Right
+       <$> withMDB keyname decode (mdb_get txn dbi)
+
+writeDBRef :: Binary a => DBRef a -> a -> DB ()
+writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
+    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    let flags  = compileWriteFlags [] -- TODO: ?
+    _ <- withMDB_ keyname $ \key -> do
+        let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ encode val
+        withForeignPtr fptr $ \ptr -> do
+            let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+            mdb_put flags txn dbi key valmdb
+    return $ Right ()
+
+decodeStrict :: Binary a => S.ByteString -> a
+decodeStrict = decode . L.fromChunks . (:[])
+
+fetch :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v -> k -> DB v
+fetch (Single dbname dbivar) k =
+    case flavor (Proxy :: Proxy f) of
+        BoundedKey      -> DB 0 $ \_ txn -> _bounded txn
+        BoundedKeyValue -> DB 0 $ \_ txn -> _bounded txn
+        HashedKey       -> DB 0 $ \_ txn -> _hashed txn
+ where
+    _bounded txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            maybe (Left $ dbError "fetch" "key not found")
+                  Right
+               <$> withMDB (S.concat $ L.toChunks $ encode k) decode (mdb_get txn dbi)
+    _hashed txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            let encodedKey = encode k
+                w = Murmur.asWord64 $ Murmur.hash64 encodedKey
+            mb <- with w $ \pw -> do
+                let mdbkey = MDB_val 8 (castPtr pw)
+                mbs <- mdb_get txn dbi mdbkey >>= traverse buildByteString
+                return $ mbs >>= runGet (findForKey k) . L.fromChunks . (:[])
+            maybe (Left $ dbError "fetch" "key not found")
+                  Right
+                   <$> return mb
+
+findMatchHashed :: forall v. Binary v
+                => L.ByteString -> MDB_cursor -> Ptr MDB_val -> Ptr MDB_val -> MDB_cursor_op -> IO (Maybe v)
+findMatchHashed encodedKey cursor pkey pval cursor_opt = do
+    bFound <- mdb_cursor_get cursor_opt cursor pkey pval
+    if not bFound
+        then return Nothing
+        else do
+            -- MDB_val klen kp <- peek pkey
+            MDB_val vlen vp <- peek pval
+            -- fkp <- newForeignPtr_ kp
+            fvp <- newForeignPtr_ vp
+            -- Values are stored as (S.ByteString,valueType)
+            --  so that we can handle hash collisions.
+            let -- hkey = S.fromForeignPtr fkp 0 (fromIntegral klen)
+                (key,val) = decodeStrict $ S.fromForeignPtr fvp 0 (fromIntegral vlen)
+            -- TODO: Should we use Eq instead of L.ByteString comparision?
+            if L.fromChunks [key] == encodedKey -- encode (key :: k) == encodedKey
+                then return $ Just val
+                else findMatchHashed encodedKey cursor pkey pval MDB_NEXT_DUP
+
+unstore :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v  -> k -> DB ()
+unstore (Single dbname dbivar) k =
+    case flavor (Proxy :: Proxy f) of
+        BoundedKey      -> DB 1 $ \_ txn -> _bounded txn
+        BoundedKeyValue -> DB 1 $ \_ txn -> _bounded txn
+        HashedKey       -> DB 1 $ \_ txn -> _hashed txn
+ where
+    _bounded txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            _ <- withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
+                    mdb_del txn dbi key Nothing
+            return $ Right ()
+    _hashed txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            let encodedKey = encode k
+                w = Murmur.asWord64 $ Murmur.hash64 encodedKey
+            with w $ \pw -> do
+                let key = MDB_val 8 (castPtr pw)
+                mbs <- mdb_get txn dbi key >>= traverse buildByteString
+                case runGet (splitKeyChunks k) $ L.fromChunks $ maybeToList mbs of
+                    []  -> void $ mdb_del txn dbi key Nothing
+                    kvs -> do
+                        let (keepers,losers) = partition (\(storedk,_) -> storedk/=k) kvs
+                            bs = L.concat $ map snd $ keepers
+                        when (not $ null losers) $ do
+                            if L.null bs
+                              then void $ mdb_del txn dbi key Nothing
+                              else withMDB_ (S.concat $ L.toChunks bs) $ \val -> do
+                                void $ mdb_put (compileWriteFlags []) txn dbi key val
+            return (Right ())
+
+-- | returns a list of (key,value) pairs with the values still
+-- encoded as bytestrings, but the keys decoded.
+splitKeyChunks :: Binary k => k -> Get [(k,L.ByteString)]
+splitKeyChunks _ = do
+    done <- isEmpty
+    if done then return []
+            else do
+        key <- get
+        vlen <- getWord32le
+        {-
+        (key,vlen) <- lookAhead $ do
+            i0 <- bytesRead
+            k <- get
+            vlen <- getWord32le
+            i1 <- bytesRead
+            return (k, fromIntegral vlen) --  + i1 - i0)
+        -}
+        bs <- getLazyByteString (fromIntegral vlen)
+        xs <- splitKeyChunks (error "dummy value")
+        return $ (key,bs) : xs
+
+
+
+store :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v -> k -> v -> DB ()
+store (Single dbname dbivar) k val =
+    case flavor (Proxy :: Proxy f) of
+        BoundedKey      -> DB 1 $ \_ txn -> _bounded txn
+        BoundedKeyValue -> DB 1 $ \_ txn -> _bounded txn
+        HashedKey       -> DB 1 $ \_ txn -> _hashed txn
+ where
+    _bounded txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            let flags  = compileWriteFlags [] -- TODO: ?
+            _ <- withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
+                let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ encode val
+                withForeignPtr fptr $ \ptr -> do
+                    let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                    mdb_put flags txn dbi key valmdb
+            return $ Right ()
+
+    _hashed txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            let flags  = compileWriteFlags [] -- TODO: ?
+                encodedKey = encode k
+                w = Murmur.asWord64 $ Murmur.hash64 encodedKey
+            with w $ \pw -> do
+                let key = MDB_val 8 (castPtr pw)
+                mbs <- mdb_get txn dbi key >>= traverse buildByteString
+                let bs = L.fromChunks (maybeToList mbs)
+                    kvs = runGet (splitKeyChunks k) bs
+                    dups = filter (\(storedk,_) -> storedk==k) kvs
+                when (null dups) $ do
+                    let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ appendKeyValue bs k val
+                    withForeignPtr fptr $ \ptr -> do
+                        let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                        void $ mdb_put flags txn dbi key valmdb
+                return $ Right ()
+
+getMany :: Binary a => Get [a]
+getMany = do
+    done <- isEmpty
+    if done then return []
+            else do
+                x <- get
+                xs <- getMany
+                return (x:xs)
+
+getManyChunks :: Binary a => Get [(a,L.ByteString)]
+getManyChunks = do
+    done <- isEmpty
+    if done then return []
+            else do
+                (x,vlen) <- lookAhead $ do
+                    i0 <- bytesRead
+                    obj <- get
+                    i1 <- bytesRead
+                    return (obj, i1 - i0)
+                bs <- getLazyByteString (fromIntegral vlen)
+                xbs <- getManyChunks
+                return $ (x,bs):xbs
+
+fetchMultiple :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> DB [v]
+fetchMultiple (Multi dbname dbivar) k =
+    case flavor (Proxy :: Proxy f) of
+        BoundedKeyValue -> DB 0 $ \_ txn -> dupsortFetch dbname dbivar txn k
+        BoundedKey ->  DB 0 $ \_ txn -> do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            maybe (Right [])
+                  Right
+               <$> withMDB (S.concat $ L.toChunks $ encode k) (runGet getMany) (mdb_get txn dbi)
+        HashedKey -> DB 0 $ \_ txn -> do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            let encodedKey = encode k
+                w = Murmur.asWord64 $ Murmur.hash64 encodedKey
+            vs <- with w $ \pw -> do
+                let mdbkey = MDB_val 8 (castPtr pw)
+                mbs <- mdb_get txn dbi mdbkey >>= traverse buildByteString
+                return $ maybeToList mbs >>= runGet (findManyForKey k) . L.fromChunks . (:[])
+            return $ Right vs
+
+dupsortFetch :: forall k v. (Eq k, Binary k, Binary v) => MapName -> TVar (Pending MDB_dbi) -> MDB_txn -> k -> IO (Either LMDB_Error [v])
+dupsortFetch dbname dbivar txn k = do
+    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) [MDB_DUPSORT]
+    let encodedKey = encode k
+        (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks encodedKey
+    withForeignPtr fptr $ \ptr -> do
+        cursor <- mdb_cursor_open txn dbi
+        alloca $ \pkey -> alloca $ \pval -> do
+            poke pkey $ MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+            Right <$> findMatch encodedKey cursor pkey pval MDB_FIRST_DUP
+ where
+    decodeValue fvp vlen =
+        -- TODO: should be using 'unsafePackCStringLen' here.
+        Just $ decodeStrict $ S.fromForeignPtr fvp 0 (fromIntegral vlen)
+
+    findMatch :: forall v. Binary v => L.ByteString -> MDB_cursor -> Ptr MDB_val -> Ptr MDB_val -> MDB_cursor_op -> IO [v]
+    findMatch encodedKey cursor pkey pval cursor_opt = do
+        bFound <- mdb_cursor_get cursor_opt cursor pkey pval
+        if not bFound
+            then do
+                -- TODO: ensure the cursor is closed; maybe do without lazy IO.
+                mdb_cursor_close cursor
+                return []
+             else do
+                MDB_val vlen vp <- peek pval
+                fvp <- newForeignPtr_ vp
+                maybe (findMatch encodedKey cursor pkey pval MDB_NEXT_DUP)
+                      (\val -> do
+                        vals <- unsafeInterleaveIO $ findMatch encodedKey cursor pkey pval MDB_NEXT_DUP
+                        return (val : vals))
+                    $ decodeValue fvp vlen
+
+
+insert :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> v -> DB ()
+insert (Multi dbname dbivar) k val =
+    case flavor (Proxy :: Proxy f) of
+        BoundedKey ->  DB 1 $ \_ txn -> do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
+                mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
+                let xbs :: [(v,L.ByteString)]
+                    xbs = maybe [] (runGet getManyChunks) mbs
+                    encoded = encode val
+                    dups = filter (\(_,storedv) -> storedv==encoded) xbs
+                when (null dups) $ do
+                    let newval = maybe encoded (`L.append` encoded) $ mbs
+                        (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks newval
+                    withForeignPtr fptr $ \ptr -> do
+                        let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                        void $ mdb_put (compileWriteFlags []) txn dbi key valmdb
+            return $ Right ()
+
+        BoundedKeyValue -> DB 1 $ \_ txn -> do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) [MDB_DUPSORT]
+            let flags  = compileWriteFlags [] -- TODO: ?
+            _ <- withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
+                let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ encode val
+                withForeignPtr fptr $ \ptr -> do
+                    let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                    mdb_put flags txn dbi key valmdb
+            return $ Right ()
+
+        HashedKey -> DB 1 $ \_ txn -> do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            let flags  = compileWriteFlags [] -- TODO: ?
+                encodedKey = encode k
+                w = Murmur.asWord64 $ Murmur.hash64 encodedKey
+            with w $ \pw -> do
+                let key = MDB_val 8 (castPtr pw)
+                mbs <- mdb_get txn dbi key >>= traverse buildByteString
+                let bs = L.fromChunks (maybeToList mbs)
+                    kvs = runGet (splitKeyChunks k) bs
+                    encoded = encode val
+                    dups = filter (\(storedk,storedv) -> storedk==k && storedv==encoded ) kvs
+                when (null dups) $ do
+                    let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ appendKeyValue bs k val
+                    withForeignPtr fptr $ \ptr -> do
+                        let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                        void $ mdb_put flags txn dbi key valmdb
+                return $ Right ()
+
+
+initMulti :: forall f k v. FlavorKind f => Multi f k v -> DB ()
+initMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
+    let flags = case flavor (Proxy :: Proxy f) of
+                    BoundedKeyValue -> [MDB_CREATE,MDB_DUPSORT]
+                    _               -> [MDB_CREATE]
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    return $ Right ()
+
+initSingle :: forall f k v. FlavorKind f => Single f k v -> DB ()
+initSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
+    let flags = case flavor (Proxy :: Proxy f) of
+                    BoundedKey      -> [MDB_CREATE]
+                    BoundedKeyValue -> [MDB_CREATE]
+                    HashedKey       -> [MDB_CREATE]
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    return $ Right ()
+
+testMulti :: forall f k v. FlavorKind f => Multi f k v -> DB ()
+testMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
+    -- TODO: Should we handle exception and return Left ?
+    let flags = case flavor (Proxy :: Proxy f) of
+                    BoundedKeyValue -> [MDB_DUPSORT]
+                    _               -> []
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    return $ Right ()
+
+testSingle :: forall f k v. FlavorKind f => Single f k v -> DB ()
+testSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
+    -- TODO: Should we handle exception and return Left ?
+    let flags = case flavor (Proxy :: Proxy f) of
+                    BoundedKey      -> []
+                    BoundedKeyValue -> []
+                    HashedKey       -> []
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    return $ Right ()
+
+
+
+-- don't export
+mdbTry :: IO a -> IO (Either LMDB_Error a)
+mdbTry action = handle (return . Left)
+                       (fmap Right action)
+
+
+data DBEnv = DBEnv MDB_env (MVar RNG)
+
+openDBEnv :: FilePath -> Maybe FilePath -> IO DBEnv
+openDBEnv path mbnoise = do
+        -- TODO Handle LMDB_Error exception?
+
+        env <- mdb_env_create
+        -- I tried to ask for pagesize, but it segfaults
+        -- stat <- mdb_env_stat env
+        -- putStrLn "InitDBS after stat"
+
+        -- mapsize can be very large, but should be a multiple of pagesize
+        -- the haskell bindings take an Int, so I just use maxBound::Int
+        space <- getAvailSpace path
+        let pagesize :: Int
+            pagesize = fromIntegral $ getPageSizeKV
+            mapsize1  = maxBound - rem maxBound pagesize
+            mapsize2  = fromIntegral $ space - rem (space - (500*1024)) (fromIntegral pagesize)
+            mapsize  = min mapsize1 mapsize2
+        mdb_env_set_mapsize env mapsize
+
+        -- maxreaders, I chose this arbitrarily.
+        -- The vcache package doesn't set it, so I'll comment it out for now
+        -- mdb_env_set_maxreaders env 10000
+
+        -- LDMB is designed to support a small handful of databases.
+        -- i choose 12 (arbitarily) as maxdbs
+        -- The vcache package uses 5
+        mdb_env_set_maxdbs env 12
+
+        mdb_env_open env path [{-todo?(options)-}]
+        g <- makeGen mbnoise
+        gv <- newMVar g
+        return $ DBEnv env gv
+
+
+closeDBEnv :: DBEnv -> IO ()
+closeDBEnv (DBEnv env _) = do
+    _ <- mdbTry $ mdb_env_close env
+    return ()
+
+
+runDB :: (NFData a, Data a) => DBEnv -> DB a -> IO (Either LMDB_Error a)
+runDB env action = tryDB env Left Right action
+
+
+--
+-- onError - compute result when transaction fails.
+-- onSuccess - compute result on bytestring-evacuated result of transaction.
+-- db_action - transaction (with pre-evacuation computations done via fmap).
+--
+tryDB :: (NFData a, Data a) => DBEnv -> (LMDB_Error -> x) -> (a -> x) -> DB a -> IO x
+tryDB (DBEnv env gv) onError onSuccess db_action = do
+    etxn <- mdbTry $ mdb_txn_begin env Nothing (not $ dbRequiresWrite db_action)
+    either (return . onError) (withTxn gv) etxn
+ where
+    withTxn gv txn = do
+        stamp <- if (dbRequiresStamp db_action)
+                    then
+#ifdef NOHOURGLASS
+                        getCurrentTime
+#else
+                        Hourglass.dateCurrent
+#endif
+                    else return $ error "BUG: unknown transaction time!"
+        ei <- handle (return . Left)
+                     (dbOperation db_action (DBParams stamp gv) txn)
+        result <- either (return . onError) (fmap onSuccess . copyByteStrings) ei
+        either (const $ mdb_txn_abort) (const $ mdb_txn_commit) ei txn
+        return result
+
+    copyByteStrings :: ( NFData v
+                       , Data v
+                       , Applicative f) => v -> f v
+    copyByteStrings v = v' `deepseq` pure v'
+     where
+        v' = Generics.everywhere (Generics.mkT S.copy) v
+
+#if defined(VERSION_crypto_random)
+type RNG = SystemRNG
+
+makeGen :: Maybe FilePath -> IO RNG
+makeGen noisefile = do
+    pool <- fromMaybe Crypto.Random.createEntropyPool $ do
+        path <- noisefile
+        Just $ createTestEntropyPool `fmap` S.readFile path
+    return (cprgCreate pool :: SystemRNG)
+
+#else
+newtype RNG = RNG (Either SystemDRG ChaChaDRG)
+instance DRG RNG where
+    randomBytesGenerate n (RNG g) =
+        either (second (RNG . Left ) . randomBytesGenerate n)
+               (second (RNG . Right) . randomBytesGenerate n) g
+
+makeGen :: Maybe FilePath -> IO RNG
+makeGen noisefile = do
+    drg <- fromMaybe (Left <$> getSystemDRG) $ do
+        path <- noisefile
+        Just $ Right . drgNewTest . decodeSeed <$> L.readFile path
+    return $ RNG drg
+ where
+    decodeSeed :: L.ByteString -> (Word64, Word64, Word64, Word64, Word64)
+    decodeSeed bs | L.null bs = (0,0,0,0,0)
+                  | otherwise = decode $  L.cycle bs
+
+instance MonadRandom DB where
+    getRandomBytes n = DB 4 $ \DBParams { dbRNG=rngv } _ -> do
+        bs <- modifyMVar rngv (return . swap . randomBytesGenerate n)
+        return $ Right bs
+
+#endif
+
+-- This is only for backward compatibility if MonadRandom class is
+-- unavailable.
+withRNG :: (RNG -> (a,RNG)) -> DB a
+withRNG f = DB 4 $ \DBParams { dbRNG=rngv } _ -> do
+    a <- modifyMVar rngv (return . swap . f)
+    return $ Right a
+
+dbtrace :: String -> DB ()
+dbtrace str = DB 0 $ \_ _ -> putStrLn str >> return (Right ())
+
+dblift :: IO a -> DB a
+dblift action = DB 0 $ \_ _ -> fmap Right action
+
+fetchByPrefix :: forall f k v. (Eq k, Binary k, Binary v) => Single 'BoundedKey k v -> S.ByteString -> DB [(k,v)]
+fetchByPrefix (Single dbname dbivar) start  = DB 0 $ \_ txn -> do
+    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    fmap (fmap (map $ decodeStrict *** decodeStrict)) $ getRange txn dbi start
+
+fetchByPrefixMultiple :: forall f k v. (Eq k, Binary k, Binary v) => Multi 'BoundedKey k v -> S.ByteString -> DB [(k,v)]
+fetchByPrefixMultiple (Multi dbname dbivar) start  = DB 0 $ \_ txn -> do
+    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    fmap (fmap (concatMap (\(k,v) -> map ((,) $ decodeStrict k) $ runGet getMany $ L.fromChunks [v])))
+        $ getRange txn dbi start
+
+
+-- | TODO: Don't export this.  This is a helper to fetchByPrefix* functions.
+getRange :: MDB_txn -> MDB_dbi -> S.ByteString -> IO (Either LMDB_Error [(S.ByteString,S.ByteString)])
+getRange txn dbi start = do
+        ei <- handle (return . Left)
+                     $ Right <$> mdb_cursor_open txn dbi
+        case ei of
+            Left e -> return $ Left e
+            Right cursor -> do
+                -- Hack: ForeignPtr is created just to attach a finalizer to the
+                -- cursor.  LMDB docs say it is okay to close the cursor either
+                -- before or after the transaction closes, but that the cursor
+                -- must be explicitly closed.  Therefore, it should be alright
+                -- to leave the timing up to the garbage collector.
+                fptr <- mallocForeignPtr :: IO (ForeignPtr Word8)
+                Foreign.Concurrent.addForeignPtrFinalizer fptr
+                        $ mdb_cursor_close cursor
+                unsafeInterleaveIO
+                 $ alloca $ \pkey ->
+                   alloca $ \pval -> do
+                    handle (return . Left) $ do
+                        let (fptr,offset,len) = S.toForeignPtr start
+                        withForeignPtr fptr $ \ptr -> do
+                            let start_mdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                            poke pkey start_mdb
+                            xs <- uncons MDB_SET_RANGE (fptr,cursor) pkey pval
+                            -- I'm using seq to force the head of the list to
+                            -- prevent start_mdb from escaping the
+                            -- withForeignPtr scope.  I'm actually not sure if
+                            -- this is neccessary.
+                            return $ Right $ length (take 1 xs) `seq` xs
+ where
+    uncons :: MDB_cursor_op
+            -> (ForeignPtr Word8, MDB_cursor)
+            -> Ptr MDB_val
+            -> Ptr MDB_val
+            -> IO [(S.ByteString,S.ByteString)]
+    uncons cop (ptr,cursor) pkey pval = do
+        is_found <- mdb_cursor_get cop cursor pkey pval
+        if is_found
+            then do
+                MDB_val klen kp <- peek pkey
+                MDB_val vlen vp <- peek pval
+                fkp <- newForeignPtr_ kp
+                fvp <- newForeignPtr_ vp
+                let key = S.fromForeignPtr fkp 0 (fromIntegral klen)
+                    val = S.fromForeignPtr fvp 0 (fromIntegral vlen)
+                xs <- unsafeInterleaveIO $ uncons MDB_NEXT (ptr,cursor) pkey pval
+                return $ (key,val):xs
+            else do
+                -- We finalize the ptr to close the cursor.  Because the ptr is
+                -- used here and in the other branch of the if statement, we
+                -- can be sure that the ptr will not go out of scope before we
+                -- are done with the cursor.  If the lazy list is truncated,
+                -- the cursor will still be closed eventually due to the
+                -- pointer's finalizer.
+                finalizeForeignPtr ptr
+                return []
+
+

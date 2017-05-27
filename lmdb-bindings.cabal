@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                lmdb-bindings
-version:             0.1.1.1
+version:             0.1.2.0
 synopsis:            Persistent Key,Value Store implemented on top of LMDB
 -- description:         
 homepage:            https://github.com/JimCrayne/kvstore-lmdb
@@ -12,9 +12,17 @@ author:              James Crayne, David Barbour
 maintainer:          jim.crayne@gmail.com
 -- copyright:           
 category:            Database
-build-type:          Simple
+build-type:          Custom
 -- extra-source-files:  
 cabal-version:       >= 1.16.0.3
+
+Flag nohourglass
+        Description: Build against older libraries to avoid the hourglass package.
+        Default: False
+
+Flag cryptonite
+        Description: Use newer cryptonite-based x509 version 1.6 and higher.
+        Default: False
 
 library
   -- other-modules:       
@@ -29,12 +37,41 @@ library
                 --, extra
                 , deepseq
                 , directory
+                , stm
+                , template-haskell
+                , murmur-hash
+                , binary
+                , syb
+  if !flag(cryptonite)
+     Build-depends:  crypto-pubkey-types >= 0.4 && < 0.5
+                   , crypto-pubkey >= 0.1.4 && < 0.3
+                   , crypto-random
+                   , cryptohash >= 0.9 && < 0.12
+  else
+     Build-depends:  memory
+  if flag(nohourglass)
+     cpp-options:  -DNOHOURGLASS
+     Build-depends: asn1-encoding >= 0.8 && < 0.9
+                   , asn1-types >= 0.2 && < 0.3
+                   , x509 >= 1.4.7 && < 1.5
+  else
+     Build-depends: asn1-encoding >= 0.9
+                   , asn1-types >= 0.3
+                   , hourglass
+     if flag(cryptonite)
+             Build-depends: cryptonite, x509 >= 1.6
+     else
+             Build-depends: x509 >= 1.5 && < 1.6
+
   build-tools: hsc2hs
   c-sources: pagesize.c
   other-extensions: DeriveDataTypeable
   exposed-modules:
     Database.LMDB
     Database.LMDB.Raw
+    Database.LMDB.Raw.Types
+    Database.LMDB.Macros
+    Data.Global.Internal
   default-language:    Haskell2010
   extra-libraries: lmdb
 

@@ -144,6 +144,7 @@ import Data.Typeable
 import Data.Function (on)
 import Data.Maybe (isNothing)
 import Data.IORef
+import Database.LMDB.Raw.Types
 
 #let alignment t = "%lu", (unsigned long)offsetof(struct {char x__; t (y__); }, y__)
 
@@ -319,9 +320,6 @@ data MDB_txn = MDB_txn
 -- | Identifier for a transaction.
 newtype MDB_txnid = MDB_txnid { _txnid :: MDB_txnid_t } deriving (Ord, Eq, Show)
 
--- | Handle for a database in the environment.
-newtype MDB_dbi = MDB_dbi { _dbi :: MDB_dbi_t } 
-
 -- | Opaque structure for LMDB cursor.
 data MDB_cursor = MDB_cursor
     { _crs_ptr :: {-# UNPACK #-} !(Ptr MDB_cursor)
@@ -345,7 +343,6 @@ data MDB_cursor' = MDB_cursor'
     }
 
 type MDB_mode_t = #type mdb_mode_t
-type MDB_dbi_t = #type MDB_dbi
 type MDB_txnid_t = CSize -- typedef not currently exposed
 
 -- | A value stored in the database. Be cautious; committing the
