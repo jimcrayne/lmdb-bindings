@@ -60,11 +60,17 @@ module Database.LMDB
     , fetchMultiple
 
     -- ** Miscelaneous utilities.
+    , TimeStamp
+    , toSeconds
+    , fromSeconds
     , Period(..)
     , addPeriod
     , RNG(..)
     , makeGen
     , withRNG
+#if defined(VERSION_crypto_random)
+    , getRandomBytes
+#endif
 
     {-
     -- ** Internal functions
@@ -230,6 +236,13 @@ import Database.LMDB.Raw.Types
 import Crypto.Random
 import Control.Arrow (second, (***))
 
+-- | This type alias comes in two flavors depending on the build settings.  By
+-- default, it will refer to Vincent Hanquez's 'Data.Hourglass.DateTime', but
+-- if the "nohourglass" build flag is set, it will instead be
+-- 'Data.Time.UTCTime'.
+--
+-- Either way, you can use 'toSeconds' and 'fromSeconds' to convert to and from
+-- an 'Int64' count of seconds since the epoch.
 #ifdef NOHOURGLASS
 type TimeStamp = UTCTime
 data Period = Period { peroidYears :: !Int
@@ -1424,9 +1437,9 @@ data DBEnv = DBEnv MDB_env (MVar RNG)
 -- opened.
 --
 -- The 'Maybe' argument indicates a path to a "noise" file which is used to
--- seed a pseudo-RNG en lieu of using true system entropy for the 'MonadRandom'
--- interface of the 'DB' transactions.  This is useful for making tests
--- reproducable.
+-- seed a pseudo-RNG en lieu of using true system entropy for the
+-- 'getRandomBytes' interface of the 'DB' transactions.  This is useful for
+-- making tests reproducable.
 --
 -- Note that it is neccessary to invoke 'closeDBEnv' to flush writes and
 -- clean-up when you are finished with the database.
@@ -1525,6 +1538,9 @@ makeGen noisefile = do
         path <- noisefile
         Just $ createTestEntropyPool `fmap` S.readFile path
     return (cprgCreate pool :: SystemRNG)
+
+getRandomBytes :: Int -> DB S.ByteString
+getRandomBytes n = withRNG (\g -> withRandomBytes g n id)
 
 #else
 newtype RNG = RNG (Either SystemDRG ChaChaDRG)

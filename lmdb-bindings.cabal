@@ -21,7 +21,7 @@ Flag nohourglass
         Default: False
 
 Flag cryptonite
-        Description: Use newer cryptonite-based x509 version 1.6 and higher.
+        Description: Use newer cryptonite-based random interface.
         Default: False
 
 library
@@ -51,17 +51,11 @@ library
      Build-depends:  memory
   if flag(nohourglass)
      cpp-options:  -DNOHOURGLASS
-     Build-depends: asn1-encoding >= 0.8 && < 0.9
-                   , asn1-types >= 0.2 && < 0.3
-                   , x509 >= 1.4.7 && < 1.5
+     Build-depends: time
   else
-     Build-depends: asn1-encoding >= 0.9
-                   , asn1-types >= 0.3
-                   , hourglass
+     Build-depends: hourglass
      if flag(cryptonite)
-             Build-depends: cryptonite, x509 >= 1.6
-     else
-             Build-depends: x509 >= 1.5 && < 1.6
+             Build-depends: cryptonite
 
   build-tools: hsc2hs
   c-sources: pagesize.c
