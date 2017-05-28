@@ -1011,6 +1011,15 @@ findManyForKey k = do
             xs <- findManyForKey k
             return (x:xs)
 
+-- | Append a serialized key, a 32-bit byte-count for a serialized value, and a
+-- serialized value to the end of a given 'L.ByteString'.
+--
+-- As of this writing, this function is only used in the case of 'HashedKey' so
+-- as to preserve the original unhashed key value within the database.  The
+-- byte-count is a convenience for skipping hash collisions without the
+-- possibly-expensive deserializion of the colliding value.
+--
+-- (internal; not exported)
 appendKeyValue :: (Binary k, Binary v) => L.ByteString -> k -> v -> L.ByteString
 appendKeyValue bs k v = bs `L.append` kv
  where
@@ -1227,6 +1236,10 @@ getManyChunks = do
                 xbs <- getManyChunks
                 return $ (x,bs):xbs
 
+-- | This is the multi-map equivlent of 'fetch'.  It returns the list of values
+-- associated with a given key.  Unlike 'fetch', this function does not fail
+-- the transaction when the key has no associations in the table.  Instead, it
+-- returns an empty list.
 fetchMultiple :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> DB [v]
 fetchMultiple (Multi dbname dbivar) k =
     case flavor (Proxy :: Proxy f) of
@@ -1279,6 +1292,10 @@ dupsortFetch dbname dbivar txn k = do
                     $ decodeValue fvp vlen
 
 
+-- | Associate a value with a given key in a multi-map table.  The table should
+-- first have been created with 'initMulti'.  This is the multi-map equivelent
+-- of the single-map 'store'.  There is currently no multi-map equevelent for
+-- 'unstore'.  TODO: implement a method for removing items from a multi-map.
 insert :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> v -> DB ()
 insert (Multi dbname dbivar) k val =
     case flavor (Proxy :: Proxy f) of
@@ -1328,6 +1345,15 @@ insert (Multi dbname dbivar) k val =
                 return $ Right ()
 
 
+-- | Create an empty multi-map table.  Use the 'database' template-haskell
+-- macro to declare a table like so:
+--
+-- > databaes [d| public_bindings = xxx :: Multi 'BoundedKey Nickname RawCertificate |]
+--
+-- The above example would declare a variable "public_bindings" that refers to
+-- a table associates a list of "RawCertificate" values with a given "Nickname"
+-- The 'BoundedKey' 'DBFlavor' indicates that keys will serialized and used
+-- directly and must meet the (usually 511-byte) conditions that LMDB imposes.
 initMulti :: forall f k v. FlavorKind f => Multi f k v -> DB ()
 initMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
     let flags = case flavor (Proxy :: Proxy f) of
@@ -1339,7 +1365,7 @@ initMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
 -- | Create an empty lookup table within a database.  The table needs to be
 -- declared using the 'database' template-haskell macro.  For example,
 --
--- database [d| freshness = xxx :: Single 'HashedKey RawCertificate Int64 |]
+-- > database [d| freshness = xxx :: Single 'HashedKey RawCertificate Int64 |]
 --
 -- The above example would declare a variable "freshness" that refers to a
 -- table that obtains 64-bit integer values given a value of type
@@ -1355,6 +1381,8 @@ initSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
     _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
     return $ Right ()
 
+-- | Fail the transaction if the given table does not exist.  It is assumed the
+-- table, if it exists, was created by 'initMulti'.
 testMulti :: forall f k v. FlavorKind f => Multi f k v -> DB ()
 testMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
     -- TODO: Should we handle exception and return Left ?
@@ -1549,6 +1577,7 @@ fetchByPrefix (Single dbname dbivar) start  = DB 0 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
     fmap (fmap (map $ decodeStrict *** decodeStrict)) $ getRange txn dbi start
 
+-- | This is the multi-map equivelent of 'fetchByPrefix'.
 fetchByPrefixMultiple :: forall f k v. (Eq k, Binary k, Binary v) => Multi 'BoundedKey k v -> S.ByteString -> DB [(k,v)]
 fetchByPrefixMultiple (Multi dbname dbivar) start  = DB 0 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
