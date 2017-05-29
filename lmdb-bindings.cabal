@@ -62,6 +62,7 @@ library
   other-extensions: DeriveDataTypeable
   exposed-modules:
     Database.LMDB
+    Database.LMDB.Flags
     Database.LMDB.Raw
     Database.LMDB.Raw.Types
     Database.LMDB.Macros
@@ -96,5 +97,8 @@ Executable lmdbtool
   build-depends:  lmdb-bindings
                 , base
                 , bytestring
+                , deepseq
+                , process
+                , binary
   hs-source-dirs: tools
   main-is:        lmdbtool.hs
