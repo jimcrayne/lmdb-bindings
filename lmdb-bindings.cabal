@@ -62,6 +62,7 @@ library
   other-extensions: DeriveDataTypeable
   exposed-modules:
     Database.LMDB
+    Database.LMDB.BinaryUtil
     Database.LMDB.Flags
     Database.LMDB.Raw
     Database.LMDB.Raw.Types

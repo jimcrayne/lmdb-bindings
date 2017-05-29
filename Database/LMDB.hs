@@ -200,8 +200,7 @@ import qualified Data.ByteString.Internal          as S
 import qualified Data.ByteString.Lazy as L
 import Data.Int
 import Data.Binary
-import Data.Binary.Get
-import Data.Binary.Put
+import Data.Binary.Get (runGet)
 import Data.Bits
 #ifdef NOHOURGLASS
 import Data.Time -- UTCTime
@@ -237,6 +236,7 @@ import Database.LMDB.Macros
 import Database.LMDB.Raw.Types
 import Crypto.Random
 import Control.Arrow (second, (***))
+import Database.LMDB.BinaryUtil
 
 -- | This type alias comes in two flavors depending on the build settings.  By
 -- default, it will refer to Vincent Hanquez's 'Data.Hourglass.DateTime', but
@@ -1024,49 +1024,6 @@ withMDB bs decode action = do
         fptr <- newForeignPtr_ ptr
         return $ decode $ L.fromChunks [S.fromForeignPtr fptr 0 (fromIntegral len)]
 
-findForKey :: (Eq k, Binary k, Binary v) => k -> Get (Maybe v)
-findForKey k = do
-    nil <- isEmpty
-    if nil
-     then return Nothing
-     else do
-        storedk <- get
-        vlen <- getWord32le
-        if storedk /= k
-            then do skip (fromIntegral vlen)
-                    done <- isEmpty
-                    if not done then findForKey k
-                                else return Nothing
-            else Just <$> get
-
-findManyForKey :: (Eq k, Binary k, Binary v) => k -> Get [v]
-findManyForKey k = do
-    m <- findForKey k
-    fromMaybe (return []) $ do
-        x <- m
-        Just $ do
-            xs <- findManyForKey k
-            return (x:xs)
-
--- | Append a serialized key, a 32-bit byte-count for a serialized value, and a
--- serialized value to the end of a given 'L.ByteString'.
---
--- As of this writing, this function is only used in the case of 'HashedKey' so
--- as to preserve the original unhashed key value within the database.  The
--- byte-count is a convenience for skipping hash collisions without the
--- possibly-expensive deserializion of the colliding value.
---
--- (internal; not exported)
-appendKeyValue :: (Binary k, Binary v) => L.ByteString -> k -> v -> L.ByteString
-appendKeyValue bs k v = bs `L.append` kv
- where
-    kv = runPut $ do
-            put k
-            putWord32le vlen
-            putLazyByteString bv
-    bv = runPut $ put v
-    vlen = fromIntegral $ L.length bv
-
 withMDB_ :: S.ByteString -> (MDB_val -> IO a) -> IO a
 withMDB_ bs action = do
     let (fptr,offset,len) = S.toForeignPtr bs
@@ -1107,9 +1064,6 @@ writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
             let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
             mdb_put flags txn dbi key valmdb
     return $ Right ()
-
-decodeStrict :: Binary a => S.ByteString -> a
-decodeStrict = decode . L.fromChunks . (:[])
 
 -- | Lookup a value from a given key using a table created by 'initSingle'.
 -- The transaction will fail if the key does not exist in the table.
@@ -1189,28 +1143,6 @@ unstore (Single dbname dbivar) k =
                                 void $ mdb_put (compileWriteFlags []) txn dbi key val
             return (Right ())
 
--- | returns a list of (key,value) pairs with the values still
--- encoded as bytestrings, but the keys decoded.
-splitKeyChunks :: Binary k => k -> Get [(k,L.ByteString)]
-splitKeyChunks _ = do
-    done <- isEmpty
-    if done then return []
-            else do
-        key <- get
-        vlen <- getWord32le
-        {-
-        (key,vlen) <- lookAhead $ do
-            i0 <- bytesRead
-            k <- get
-            vlen <- getWord32le
-            i1 <- bytesRead
-            return (k, fromIntegral vlen) --  + i1 - i0)
-        -}
-        bs <- getLazyByteString (fromIntegral vlen)
-        xs <- splitKeyChunks (error "dummy value")
-        return $ (key,bs) : xs
-
-
 
 -- | Store a key/value pair into a table.  If the key already existed, it will
 -- be overwritten.  See 'initSingle' for how to declare a table of type
@@ -1249,29 +1181,6 @@ store (Single dbname dbivar) k val =
                         let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
                         void $ mdb_put flags txn dbi key valmdb
                 return $ Right ()
-
-getMany :: Binary a => Get [a]
-getMany = do
-    done <- isEmpty
-    if done then return []
-            else do
-                x <- get
-                xs <- getMany
-                return (x:xs)
-
-getManyChunks :: Binary a => Get [(a,L.ByteString)]
-getManyChunks = do
-    done <- isEmpty
-    if done then return []
-            else do
-                (x,vlen) <- lookAhead $ do
-                    i0 <- bytesRead
-                    obj <- get
-                    i1 <- bytesRead
-                    return (obj, i1 - i0)
-                bs <- getLazyByteString (fromIntegral vlen)
-                xbs <- getManyChunks
-                return $ (x,bs):xbs
 
 -- | This is the multi-map equivlent of 'fetch'.  It returns the list of values
 -- associated with a given key.  Unlike 'fetch', this function does not fail
