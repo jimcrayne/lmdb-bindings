@@ -23,30 +23,47 @@ import Foreign.Storable
 import qualified Data.ByteString.Internal          as S
 import Foreign.Marshal.Alloc
 import Foreign.ForeignPtr
+import Control.Exception
+
+
+    
+    
 
 usage :: IO ()
 usage = let cs = 
-               [ ["listTables",path]         
-               , ["createTable",path,tbl]    
-               , ["deleteTable",path,tbl]    
-               , ["clearTable",path,tbl]     
-               , ["insertKey",path,tbl,key,val]  
-               , ["deleteKey",path,tbl,key]  
-               , ["keysOf",path,tbl]         
-               , ["valsOf",path,tbl]         
-               , ["lookupKey",path,tbl,key]  
-               , ["toList",path,tbl]         
+               [ ["    listTables",path]         
+               , ["    createTable",path,tbl]    
+               , ["    deleteTable",path,tbl]    
+               , ["    clearTable",path,tbl]     
+               , ["    insertKey",path,tbl,key,val]  
+               , ["    deleteKey",path,tbl,key]  
+               , ["{*} keysOf",path,tbl]         
+               , ["{*} valsOf",path,tbl]         
+               , ["    lookupKey",path,tbl,key]  
+               , ["{*} toList",path,tbl]         
                  -- Variation of toList
-               , ["show",path,tbl]
-               , ["show",path]                  ]
+               , ["    show",path,tbl]
+               , ["    show",path]
+                 -- Copy commands
+               , ["{*} copy1",bool,path,tbl,key,path]
+               , ["{*} copy1",bool,path,tbl,key,path,tbl]
+               , ["{*} copy1",bool,path,tbl,key,path,tbl,key]
+               , ["    copyTable",bool,path,tbl,path]
+               , ["    copyTable",bool,path,tbl,path,tbl]
+               ]
             path = "<path>"
             tbl = "<table>"
             key = "<key>"
             val = "<value>"
-            fmt xs = "    " <> B.unwords xs
+            bool = "[true|false]"
+            fmt xs = " " <> B.unwords xs
             in do
                 putStrLn "Usage: ldmbtool <command> [<options>]\n"
                 putStrLn "Commands:" >> mapM_ (B.putStrLn . fmt) cs
+                putStrLn ""
+                putStrLn "Notes:"
+                putStrLn "   {*} These commands accept ‘@’ as name of Main table (internalUnamedDB)."
+                putStrLn "   On copy commands, ‘true’ indicates to allow duplicate keys."
 
 main :: IO ()
 main = do
@@ -76,6 +93,21 @@ main = do
         -- Variation of toList
         ["show",path,tbl]           -> mapM_ putPair =<< toList (u path) tbl
         ["show",path]               -> mapM_ (putTbl path) =<< listTables (u path)
+        -- Copy commands
+        ["copy1",path,"@",key,dest]          -> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,tbl,key,dest]          -> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,"@",key,dest,tbl2]     -> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,"@",key,dest,"@"]      -> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,tbl,key,dest,tbl2]     -> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,tbl,key,dest,"@"]      -> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,"@",key,dest,tbl2,key2]-> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,"@",key,dest,"@", key2]-> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,tbl,key,dest,tbl2,key2]-> putStrLn "Copy1 command is not yet implemented."
+        ["copy1",path,tbl,key,dest,"@",key2] -> putStrLn "Copy1 command is not yet implemented."
+        ["copyTable","true",path,tbl,dest]      -> v $ copyTable True (u path) tbl (u dest) tbl
+        ["copyTable","false",path,tbl,dest]     -> v $ copyTable False (u path) tbl (u dest) tbl
+        ["copyTable","true",path,tbl,dest,tbl2] -> v $ copyTable True (u path) tbl (u dest) tbl2
+        ["copyTable","false",path,tbl,dest,tbl2]-> v $ copyTable False (u path) tbl (u dest) tbl2
         _ -> usage
 
 

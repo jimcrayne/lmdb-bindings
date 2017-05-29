@@ -99,6 +99,7 @@ module Database.LMDB
     -- ** Public interface.
     , DBS
     , withDBSDo
+    , withManyDBSDo
     , withDBSCreateIfMissing
     , initDBS
     , openDBS
@@ -116,6 +117,8 @@ module Database.LMDB
     , add
     -- ** Internal and/or Unsafe Functions (DBS Interface)
     , unsafeFetch
+    , getDBFlags
+    , internalOpenDB
     , internalUnamedDB
     , unsafeDumpToList
     , unsafeDumpToListOp
@@ -134,6 +137,7 @@ module Database.LMDB
     , toList
     , keysOf
     , valsOf
+    , copyTable
     -- * Higher Level DBS functions (DBS is already open, and not to be closed)
     , listTables'
     , deleteTable'
@@ -320,6 +324,12 @@ data DBHandle = DBH { dbhEnv :: (MDB_env, MVar Bool)
 withDBSDo :: FilePath -> (DBS -> IO a) -> IO a
 withDBSDo dir action = bracket (initDBS dir) shutDownDBS action
 
+-- | like 'withDBSDo' but opens many environments at once
+withManyDBSDo :: [FilePath] -> ([DBS] -> IO a) -> IO a
+withManyDBSDo dirs action =
+    bracket (mapM initDBS dirs)
+            (mapM shutDownDBS)
+            action
 
 withDBSCreateIfMissing dir action = do
     createDirectoryIfMissing True dir
@@ -557,6 +567,16 @@ openDupDB dbs name = do
             (\txn -> mdb_set_dupsort txn dbi compare)
     return handle
 
+-- openDBForCopy db name
+-- Like 'openDupDB' but with explicit flags, and comparsion function
+openDBForCopy ::  DBS -> ByteString -> [MDB_DbFlag] -> FunPtr MDB_cmp_func -> IO DBHandle
+openDBForCopy dbs name flags compare = do
+    handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB flags dbs name
+    bracketIfOpen mvar0 (mdb_txn_begin env Nothing False)
+            mdb_txn_commit
+            (\txn -> mdb_set_dupsort txn dbi compare)
+    return handle
+
 -- | closeDB db name
 -- Close the database.
 closeDB :: DBHandle -> IO ()
@@ -569,6 +589,20 @@ closeDB (DBH (env,eMvar) dbi writeflags mvar) = do
             modifyMVar_ mvar (return . const False)
             mdb_dbi_close env dbi
       else error ("Cannot close database due to environment being already shutdown.") 
+
+-- | get the flags associated with a table
+getDBFlags :: DBHandle -> IO [MDB_DbFlag]
+getDBFlags (DBH (env,eMvar) dbi writeflags mvar) = do
+    eOpen <- readMVar eMvar
+    if eOpen
+      then do
+        dbisopen <- readMVar mvar
+        if dbisopen
+            then bracket (mdb_txn_begin env Nothing False)
+                         (mdb_txn_commit)
+                         (\txn -> mdb_dbi_flags txn dbi)
+            else return []
+      else return []
 
 
 -- | unsafeFetch dbhandle key - lookup a key in the database
@@ -850,6 +884,56 @@ valsOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
     force vals `seq` final 
     return vals
 
+-- | Copy a table (LMDB database) from one environment to another or
+--   copy a table to a different table within an environment.
+--
+--   If this is to create a new environment, you may need to create
+--   an empty directory first.
+--
+--  Parameters:
+--      bAllowDuplicates - True to set comparision function to 1,
+--                         thereby preserving order and allowing 
+--                         duplicate key pairs. Usually
+--                         you don't want this. But you probably
+--                         do if you used 'openDupDB'.
+--      
+--      dir1 tbl1   - Source environment(path) and table name
+--      dir2 tbl2   - Destination environment(path) and table name
+--
+--  Returns:
+--      [(bReplaced,(key,val)] -> list of all keys and values inserted
+--                                paired with a boolean flag indicating
+--                                if the key was already in the destination.
+copyTable :: Bool -> FilePath -> S.ByteString -> FilePath -> S.ByteString -> IO [(Bool, (S.ByteString, S.ByteString))]
+copyTable bAllowDuplicates dir1 tbl dir2 tbl2 | dir1 /= dir2 = withManyDBSDo [dir1,dir2] $ \[dbs1,dbs2] -> do
+    d <- openDB dbs1 tbl
+    flag <- getDBFlags d
+    let (<>) = S.append
+    -- S.putStrLn (tbl <> S.pack " FLAGS(1): " <> S.pack (show flag))
+    compare <- wrapCmpFn (\_ _ -> return 1)
+    d2 <- if bAllowDuplicates then openDBForCopy dbs2 tbl2 (MDB_CREATE:flag) compare
+                              else internalOpenDB (MDB_CREATE:flag) dbs2 tbl2
+    (xs,final) <- unsafeDumpToList d
+    let ys   = map copy xs
+        copy (x,y) = (S.copy x, S.copy y)
+    bools <- mapM (\(k,v) -> add d2 k v) ys
+    return (zip bools ys)
+copyTable bAllowDuplicates dir1 tbl dir2 tbl2 | dir1 == dir2 && (tbl /= tbl2 || bAllowDuplicates) = withDBSDo dir1 $ \dbs -> do
+    d <- openDB dbs tbl
+    flag <- getDBFlags d
+    let (<>) = S.append
+    -- S.putStrLn (tbl <> S.pack " FLAGS(2): " <> S.pack (show flag))
+    compare <- wrapCmpFn (\_ _ -> return 1)
+    d2 <- if bAllowDuplicates then openDBForCopy dbs tbl2 (MDB_CREATE:flag) compare
+                              else internalOpenDB (MDB_CREATE:flag) dbs tbl2
+    (xs,final) <- unsafeDumpToList d
+    let ys   = map copy xs
+        copy (x,y) = (S.copy x, S.copy y)
+    bools <- mapM (\(k,v) -> add d2 k v) ys
+    return (zip bools ys)
+copyTable False dir1 tbl dir2 tbl2 | dir1 == dir2 && tbl == tbl2 = do
+    xs <- toList dir1 tbl
+    return $ zip (repeat False) xs
 
 ------------------------------------------
 --  Static Typed Database Interface
