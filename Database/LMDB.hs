@@ -199,7 +199,7 @@ import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Internal          as S
 import qualified Data.ByteString.Lazy as L
 import Data.Int
-import Data.Binary
+import Data.Binary (encode,decode,Binary)
 import Data.Binary.Get (runGet)
 import Data.Bits
 #ifdef NOHOURGLASS
@@ -1012,8 +1012,8 @@ buildByteString (MDB_val size ptr) = do
 -- [ action ] Operation on MDB_val to container of MDB_vals.
 --
 -- Note: Any lazy-IO is destroyed here by invoking 'traverse'.
-withMDB :: forall f a. Traversable f => S.ByteString -> (L.ByteString -> a) -> (MDB_val -> IO (f MDB_val)) -> IO (f a)
-withMDB bs decode action = do
+withMDB :: forall f a. Traversable f => S.ByteString -> (S.ByteString -> a) -> (MDB_val -> IO (f MDB_val)) -> IO (f a)
+withMDB bs decodeS action = do
     let (fptr,offset,len) = S.toForeignPtr bs
     withForeignPtr fptr $ \ptr -> do
         mb <- action (MDB_val (fromIntegral len) (ptr `plusPtr` offset))
@@ -1022,7 +1022,7 @@ withMDB bs decode action = do
     decodeMDB :: MDB_val -> IO a
     decodeMDB (MDB_val len ptr) = do
         fptr <- newForeignPtr_ ptr
-        return $ decode $ L.fromChunks [S.fromForeignPtr fptr 0 (fromIntegral len)]
+        return $ decodeS $ S.fromForeignPtr fptr 0 (fromIntegral len)
 
 withMDB_ :: S.ByteString -> (MDB_val -> IO a) -> IO a
 withMDB_ bs action = do
@@ -1047,7 +1047,7 @@ readDBRef (DBRef keyname dbivar) = DB 0 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
     maybe (Left $ dbError "readDBRef" "bad reference")
           Right
-       <$> withMDB keyname decode (mdb_get txn dbi)
+       <$> withMDB keyname decodeStrict (mdb_get txn dbi)
 
 -- | Write a 'DBRef'' value to a database.
 --
@@ -1059,7 +1059,7 @@ writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
     dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
     let flags  = compileWriteFlags [] -- TODO: ?
     _ <- withMDB_ keyname $ \key -> do
-        let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ encode val
+        let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
         withForeignPtr fptr $ \ptr -> do
             let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
             mdb_put flags txn dbi key valmdb
@@ -1078,7 +1078,7 @@ fetch (Single dbname dbivar) k =
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
             maybe (Left $ dbError "fetch" "key not found")
                   Right
-               <$> withMDB (S.concat $ L.toChunks $ encode k) decode (mdb_get txn dbi)
+               <$> withMDB (encodeStrict k) decodeStrict (mdb_get txn dbi)
     _hashed txn = do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
             let encodedKey = encode k
@@ -1121,7 +1121,7 @@ unstore (Single dbname dbivar) k =
  where
     _bounded txn = do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
-            _ <- withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
+            _ <- withMDB_ (encodeStrict k) $ \key -> do
                     mdb_del txn dbi key Nothing
             return $ Right ()
     _hashed txn = do
@@ -1157,8 +1157,8 @@ store (Single dbname dbivar) k val =
     _bounded txn = do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
             let flags  = compileWriteFlags [] -- TODO: ?
-            _ <- withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
-                let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ encode val
+            _ <- withMDB_ (encodeStrict k) $ \key -> do
+                let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
                 withForeignPtr fptr $ \ptr -> do
                     let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
                     mdb_put flags txn dbi key valmdb
@@ -1194,7 +1194,7 @@ fetchMultiple (Multi dbname dbivar) k =
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
             maybe (Right [])
                   Right
-               <$> withMDB (S.concat $ L.toChunks $ encode k) (runGet getMany) (mdb_get txn dbi)
+               <$> withMDB (encodeStrict k) (runGet getMany . L.fromChunks . (:[]) ) (mdb_get txn dbi)
         HashedKey -> DB 0 $ \_ txn -> do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
             let encodedKey = encode k
@@ -1247,7 +1247,7 @@ insert (Multi dbname dbivar) k val =
     case flavor (Proxy :: Proxy f) of
         BoundedKey ->  DB 1 $ \_ txn -> do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
-            withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
+            withMDB_ (encodeStrict k) $ \key -> do
                 mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
                 let xbs :: [(v,L.ByteString)]
                     xbs = maybe [] (runGet getManyChunks) mbs
@@ -1264,8 +1264,8 @@ insert (Multi dbname dbivar) k val =
         BoundedKeyValue -> DB 1 $ \_ txn -> do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) [MDB_DUPSORT]
             let flags  = compileWriteFlags [] -- TODO: ?
-            _ <- withMDB_ (S.concat $ L.toChunks $ encode k) $ \key -> do
-                let (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks $ encode val
+            _ <- withMDB_ (encodeStrict k) $ \key -> do
+                let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
                 withForeignPtr fptr $ \ptr -> do
                     let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
                     mdb_put flags txn dbi key valmdb

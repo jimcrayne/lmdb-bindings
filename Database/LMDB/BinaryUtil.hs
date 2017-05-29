@@ -117,4 +117,6 @@ appendKeyValue bs k v = bs `L.append` kv
 decodeStrict :: Binary a => S.ByteString -> a
 decodeStrict = decode . L.fromChunks . (:[])
 
-
+-- | Like 'encode' but returns a strict 'S.ByteString'.
+encodeStrict :: Binary a => a -> S.ByteString
+encodeStrict =  S.concat . L.toChunks . encode
