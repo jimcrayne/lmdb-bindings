@@ -1,13 +1,13 @@
 -- | This module provides two interfaces:
 --
--- 1. A high-level type-safe interface that abstracts-away the detail that you
--- are using LMDB.  It should only be used with databases that it was used to
--- create.  Rather than the LMDB structure, the database is represented as a
--- collection of mutable references ('DBRef') and mutable lookup tables
--- ('Single' and 'Multi').
+-- 1. A type-safe interface centered around the 'DBEnv' and 'DB' datatypes. It
+-- should only be used with databases that it was used to create.  Rather than
+-- the LMDB structure, the database is represented as a collection of mutable
+-- references ('DBRef') and mutable lookup tables ('Single' and 'Multi').
 --
--- 2. A lower level interface that exposes more of LMDB's features/settings and
--- allows you to operate on arbitrary LMDB environments.
+-- 2. An untyped interface centered around the 'DBS' and 'DBHandle' datatypes.
+-- It is useful for operating on arbitrary LMDB environments and debugging.
+-- This is the interface used by the @lmdbtool@ utility.
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE CPP #-}
@@ -18,10 +18,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
 module Database.LMDB
+
     ( module Database.LMDB.Macros
     , LMDB_Error(..)
 
-    -- * The high-level DB monad interface
+    -- * The Typed DB Monad Interface
 
     -- ** The Database Evironment
     , DBEnv -- (..)
@@ -93,7 +94,8 @@ module Database.LMDB
     , DBParams(..)
     -}
 
-    -- * The Low-level DBS Interface
+    -- * The Untyped DBS Interface
+
     -- ** Public interface.
     , DBS
     , withDBSDo
@@ -120,7 +122,7 @@ module Database.LMDB
     -- ** Query for open environment(s) (Process Globals)
     , isOpenEnv
     , listEnv
-    -- * Atomic functions using file paths and names only
+    -- * Higher Level Atomic functions using file paths and names only
     , listTables
     , listTablesCreateIfMissing
     , deleteTable
@@ -132,7 +134,7 @@ module Database.LMDB
     , toList
     , keysOf
     , valsOf
-    -- * Like the atomic file path functions, but operates on an open environment
+    -- * Higher Level DBS functions (DBS is already open, and not to be closed)
     , listTables'
     , deleteTable'
     , createTable'
@@ -369,7 +371,24 @@ listEnv = do
 -- Start up and initialize whatever engine(s) provide access to the 
 -- environment specified by the given path. 
 initDBS :: FilePath -> IO DBS
-initDBS dir = do
+initDBS dir = 
+  initDBSOptions
+            -- path to lmdb environment
+            dir 
+
+            -- maxreaders, I chose this arbitrarily.
+            -- The vcache package doesn't set it.
+            (Just 1000) 
+
+            -- LDMB is designed to support a small handful of databases.
+            -- i choose 10 (arbitarily) as maxdbs
+            -- The vcache package uses 5
+            (Just 10)
+
+            [{-todo?(options)-}]
+
+initDBSOptions :: FilePath -> Maybe Int -> Maybe Int -> [MDB_EnvFlag] -> IO DBS
+initDBSOptions dir mbMaxReader mbMaxDb options = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
     let registryMVar = declareMVar "LMDB Environments" h
     registry <- takeMVar registryMVar -- lock registry
@@ -409,16 +428,21 @@ initDBS dir = do
                 mapsize  = min mapsize1 mapsize2
             mdb_env_set_mapsize env mapsize
 
-            -- maxreaders, I chose this arbitrarily.
-            -- The vcache package doesn't set it, so I'll comment it out for now
-            mdb_env_set_maxreaders env 10000 
+            case mbMaxReader of
+                -- maxreaders, I chose this arbitrarily.
+                Just x  -> mdb_env_set_maxreaders env x
+                -- The vcache package doesn't set it, so I'll comment it out for now
+                Nothing -> return ()
 
             -- LDMB is designed to support a small handful of databases.
-            -- i choose 10 (arbitarily) as maxdbs
             -- The vcache package uses 5
-            mdb_env_set_maxdbs env 10 
+            case mbMaxDb of
+                -- i choose x (arbitarily) as maxdbs
+                Just x -> mdb_env_set_maxdbs env 10 
+                -- i choose 10 (arbitarily) as maxdbs
+                Nothing -> mdb_env_set_maxdbs env 10 
 
-            mdb_env_open env dir [{-todo?(options)-}]
+            mdb_env_open env dir options
             case maybeMVar of
                 Nothing -> do
                     isopen <- newMVar True
@@ -1429,7 +1453,7 @@ mdbTry action = handle (return . Left)
 
 
 -- | An opague type representing an open database.
-data DBEnv = DBEnv MDB_env (MVar RNG)
+data DBEnv = DBEnv DBS (MVar RNG)
 
 -- | Open a database.  The current design is limited in that data represented
 -- by 'DBRef', 'Single', and 'Multi' are assumed to be associated with only a
@@ -1445,43 +1469,35 @@ data DBEnv = DBEnv MDB_env (MVar RNG)
 -- clean-up when you are finished with the database.
 openDBEnv :: FilePath -> Maybe FilePath -> IO DBEnv
 openDBEnv path mbnoise = do
-        -- TODO Handle LMDB_Error exception?
+        dbsEnv <-
+          initDBSOptions
+            -- path to lmdb environment
+            path
+            -- maxreaders, I chose this arbitrarily.
+            -- The vcache package doesn't set it, so I'll comment it out for now
+            -- mdb_env_set_maxreaders env 10000
+            Nothing -- 10000
+            -- LDMB is designed to support a small handful of databases.
+            -- i choose 12 (arbitarily) as maxdbs
+            -- The vcache package uses 5
+            (Just 12)
+            -- LMDB Environment flags
+            []
 
-        env <- mdb_env_create
-        -- I tried to ask for pagesize, but it segfaults
-        -- stat <- mdb_env_stat env
-        -- putStrLn "InitDBS after stat"
-
-        -- mapsize can be very large, but should be a multiple of pagesize
-        -- the haskell bindings take an Int, so I just use maxBound::Int
-        space <- getAvailSpace path
-        let pagesize :: Int
-            pagesize = fromIntegral $ getPageSizeKV
-            mapsize1  = maxBound - rem maxBound pagesize
-            mapsize2  = fromIntegral $ space - rem (space - (500*1024)) (fromIntegral pagesize)
-            mapsize  = min mapsize1 mapsize2
-        mdb_env_set_mapsize env mapsize
-
-        -- maxreaders, I chose this arbitrarily.
-        -- The vcache package doesn't set it, so I'll comment it out for now
-        -- mdb_env_set_maxreaders env 10000
-
-        -- LDMB is designed to support a small handful of databases.
-        -- i choose 12 (arbitarily) as maxdbs
-        -- The vcache package uses 5
-        mdb_env_set_maxdbs env 12
-
-        mdb_env_open env path [{-todo?(options)-}]
         g <- makeGen mbnoise
         gv <- newMVar g
-        return $ DBEnv env gv
+        return $ DBEnv dbsEnv gv
 
 
 -- | Close a database.
 closeDBEnv :: DBEnv -> IO ()
-closeDBEnv (DBEnv env _) = do
-    _ <- mdbTry $ mdb_env_close env
-    return ()
+closeDBEnv (DBEnv (DBS env dir emvar) _) = do
+    open <- takeMVar emvar
+    if open
+        then do
+            _ <- mdbTry $ mdb_env_close env
+            putMVar emvar False
+        else putMVar emvar open
 
 
 -- | Run a single atomic transaction on an open database.  If something goes
@@ -1503,7 +1519,7 @@ runDB env action = tryDB env Left Right action
 --  fmap).
 --
 tryDB :: (NFData a, Data a) => DBEnv -> (LMDB_Error -> x) -> (a -> x) -> DB a -> IO x
-tryDB (DBEnv env gv) onError onSuccess db_action = do
+tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
     etxn <- mdbTry $ mdb_txn_begin env Nothing (not $ dbRequiresWrite db_action)
     either (return . onError) (withTxn gv) etxn
  where
