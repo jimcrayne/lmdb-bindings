@@ -960,12 +960,12 @@ copyTable False dir1 tbl dir2 tbl2 | dir1 == dir2 && tbl == tbl2 = do
 
 ------------------------------------------
 --  Static Typed Database Interface
---
+
 -- | Monad representing a database transaction
 --
--- If the user avoids the 'Monad' bind operation and restricts himself
--- to the 'Applicative' interface, then the following will be automatically
--- detected:
+-- If the user avoids the 'Monad' bind operation and restricts himself to the
+-- 'Applicative' and 'cases' interface, then the following will be
+-- automatically detected:
 --
 --  * whether or not the transaction requires write-access
 --
@@ -1079,22 +1079,21 @@ orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
                                   return $ Right x
             else either (const $ dbOperation b stamp txn) (return . Right) ea
 
-
--- | Use this to this along with the 'Applicative' interface to create dynamic
--- read-only transactions.  All cases must be handled and they are all examined
--- for write accesses.  If any case would trigger a write access, then the
--- resulting transaction is read/write.
---
--- To be clear, the purpose here is to allow branching without requiring use of
--- the 'Monad' bind operation which has documented drawbacks for the 'DB'
--- monad.
---
--- A common situation is to perform an if/then branch based on the results of
+-- | A common situation is to perform an if/then branch based on the results of
 -- prior 'DB' operations.  Since 'Bool' implements 'Bounded' and 'Enum', we can
 -- use 'cases' to evaluate both possibilities ahead of time (before any
 -- database operations are performed) and determine that in all cases, the
 -- transaction remains read-only.  Thus the write flag needn't be specified for
 -- the underlying LMDB transaction.
+--
+-- This function is called "cases" because it provides control functionality
+-- similar to a case ... of ... expression.  The second argument might be
+-- elegantly specified using the \"LambdaCase\" haskell syntax.
+--
+-- The astute reader will notice that its type is similar to that of '>>=' but
+-- with restrictions that the input implement 'Bounded' and 'Enum'.  This
+-- similarity is intentional.  Use this instead of '>>=' if you want to avoid
+-- setting the write-acces, entropy, and timestamp flags unneccessarily.
 cases :: forall a x. (Bounded a, Enum a) => DB a -> (a -> DB x) -> DB x
 cases toggle op = DB flags $ \stamp txn -> do
     ei <- dbOperation toggle stamp txn
