@@ -87,6 +87,11 @@ module Database.LMDB
     , isOpenEnv
     , listEnv
     -- **** High Level Functions
+    --
+    -- | These functions are similar to the operations facilitated by
+    --   the @lmdbtool@ utility. The unticked variants which open and
+    --   close the environment are provided for when you only want to
+    --   do one operation. (See '<#HLAF Higher Level Atomic Functions>'). (anchor #HLF#)
     , listTables'
     , deleteTable'
     , createTable'
@@ -136,7 +141,7 @@ module Database.LMDB
     --   They do all the work of opening and closing the environment.
     --   They are similar to the commands of the  @lmdbtool@ utility
     --   (If you prefer to leave the environment open use functions under
-    --   the heading 'High Level functions'.)
+    --   the heading <#HLF Higher Level Functions>.) #HLAF#
     --
     , listTables
     , listTablesCreateIfMissing
@@ -159,7 +164,7 @@ import Control.Concurrent (myThreadId, ThreadId(..))
 import Database.LMDB.Raw
 import Data.ByteString.Internal
 import qualified Data.ByteString.Char8 as S
-import Foreign.ForeignPtr hiding (addForeignPtrFinalizer) 
+import Foreign.ForeignPtr hiding (addForeignPtrFinalizer)
 import Foreign.Concurrent
 import Foreign.Ptr
 import Data.Word
