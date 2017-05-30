@@ -57,6 +57,7 @@ module Database.LMDB
     , initMulti
     , testMulti
     , insert
+    , remove
     , fetchByPrefixMultiple
     , fetchMultiple
 
@@ -1251,16 +1252,25 @@ findMatchHashed encodedKey cursor pkey pval cursor_opt = do
 unstore :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v  -> k -> DB ()
 unstore (Single dbname dbivar) k =
     case flavor (Proxy :: Proxy f) of
-        BoundedKey      -> DB 1 $ \_ txn -> _bounded txn
-        BoundedKeyValue -> DB 1 $ \_ txn -> _bounded txn
-        HashedKey       -> DB 1 $ \_ txn -> _hashed txn
- where
-    _bounded txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+        BoundedKey      -> DB 1 $ _del_bounded dbname dbivar k Nothing []
+        BoundedKeyValue -> DB 1 $ _del_bounded dbname dbivar k Nothing []
+        HashedKey       -> DB 1 $ _del_hashed dbname dbivar k Nothing
+
+_del_bounded ::
+    (Binary k, Eq k) =>
+    ByteString -> TVar (Pending MDB_dbi) -> k -> Maybe MDB_val -> [MDB_DbFlag]
+        -> DBParams -> MDB_txn -> IO (Either a1 ())
+_del_bounded dbname dbivar k mbval flags _ txn = do
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
             _ <- withMDB_ (encodeStrict k) $ \key -> do
-                    mdb_del txn dbi key Nothing
+                    mdb_del txn dbi key mbval
             return $ Right ()
-    _hashed txn = do
+
+_del_hashed ::
+    (Binary k, Eq k) =>
+    ByteString -> TVar (Pending MDB_dbi) -> k -> Maybe MDB_val
+        -> DBParams -> MDB_txn -> IO (Either a ())
+_del_hashed dbname dbivar k mbval _ txn = do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
@@ -1268,13 +1278,14 @@ unstore (Single dbname dbivar) k =
                 let key = MDB_val 8 (castPtr pw)
                 mbs <- mdb_get txn dbi key >>= traverse buildByteString
                 case runGet (splitKeyChunks k) $ L.fromChunks $ maybeToList mbs of
-                    []  -> void $ mdb_del txn dbi key Nothing
+                    []  -> void $ mdb_del txn dbi key mbval
                     kvs -> do
+                        -- TODO: If mbval is not Nothing, require match for deletion.
                         let (keepers,losers) = partition (\(storedk,_) -> storedk/=k) kvs
                             bs = L.concat $ map snd $ keepers
                         when (not $ null losers) $ do
                             if L.null bs
-                              then void $ mdb_del txn dbi key Nothing
+                              then void $ mdb_del txn dbi key mbval
                               else withMDB_ (S.concat $ L.toChunks bs) $ \val -> do
                                 void $ mdb_put (compileWriteFlags []) txn dbi key val
             return (Right ())
@@ -1426,6 +1437,28 @@ insert (Multi dbname dbivar) k val =
                         void $ mdb_put flags txn dbi key valmdb
                 return $ Right ()
 
+-- | Remove a key/value pair from a table that was created with 'initMulti'.
+--
+-- If 'Nothing' is specified for the value, then all values associated with the
+-- given key will be removed.  Otherwise, only matching values will be removed.
+--
+-- __WARNING__: This function is not yet implemented for the 'BoundedKey' and
+-- 'HashedKey' flavors.  Only the DUPSORT variation ('BoundedKeyValue') is
+-- implemented.  TODO: fix this.
+remove :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> Maybe v -> DB ()
+remove (Multi dbname dbivar) k mbval =
+    case flavor (Proxy :: Proxy f) of
+        BoundedKey      -> DB 1 $ \_ txn -> error "todo: BoundedKey varient of remove"
+
+        BoundedKeyValue -> case mbval of
+            Nothing  -> DB 1 $ _del_bounded dbname dbivar k Nothing [MDB_DUPSORT]
+            Just val -> DB 1 $ \params txn -> do
+                let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
+                withForeignPtr fptr $ \ptr -> do
+                    let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                    _del_bounded dbname dbivar k (Just valmdb) [MDB_DUPSORT] params txn
+
+        HashedKey       -> DB 1 $ \_ txn -> error "todo: HashedKey varient of remove"
 
 -- | Create an empty multi-map table.  Use the 'database' template-haskell
 -- macro to declare a table like so:
