@@ -66,6 +66,7 @@ library
     Database.LMDB.Raw.Types
     Database.LMDB.Macros
     Data.Global.Internal
+    PackUtf8
   default-language:    Haskell2010
   extra-libraries: lmdb
 

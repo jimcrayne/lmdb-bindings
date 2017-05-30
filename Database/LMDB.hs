@@ -86,6 +86,8 @@ module Database.LMDB
     -- **** Already open?
     , isOpenEnv
     , listEnv
+    , isOpenEnv'
+    , listEnv'
     -- **** High Level Functions
     --
     -- | These functions are similar to the operations facilitated by
@@ -247,6 +249,7 @@ import Database.LMDB.Raw.Types
 import Crypto.Random
 import Control.Arrow (second, (***))
 import Database.LMDB.BinaryUtil
+import PackUtf8
 
 -- | This type alias comes in two flavors depending on the build settings.  By
 -- default, it will refer to Vincent Hanquez's 'Data.Hourglass.DateTime', but
@@ -349,16 +352,27 @@ declareMVar s _ = error ("ERROR: Cannot fectch global MVar named " ++ show s)
 {-# NOINLINE _registryMVar #-}
 _registryMVar = unsafePerformIO $ (H.new >>= newMVar) :: MVar (HashTable ByteString DBS)
 
-isOpenEnv dir = do
+-- | Is this 'Filepath' a currently open LMDB Environment?
+isOpenEnv :: FilePath -> IO Bool
+isOpenEnv = isOpenEnv' . packUtf8
+
+-- | Get list of open environments, using 'FilePath' type
+listEnv = map unpackUtf8 <$> listEnv'
+
+-- | Given a path encoded as a utf8 bytestring, does the current process have it as a currently open LMDB Environment?
+isOpenEnv' :: S.ByteString -> IO Bool
+isOpenEnv' dir = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
     let registryMVar = declareMVar "LMDB Environments" h
     registry <- readMVar registryMVar 
-    result <- H.lookup registry dir 
+    result <- H.lookup registry dir
     case result of
         Nothing -> return False
         Just (DBS _ _ mvar) -> readMVar mvar
 
-listEnv = do
+-- | Get list of open environment paths as Utf8 encoded ByteStrings
+listEnv' :: IO [S.ByteString]
+listEnv' = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
     let registryMVar = declareMVar "LMDB Environments" h
     registry <- readMVar registryMVar 
