@@ -60,22 +60,21 @@ unaliasArgs args@(a:b:args') = do
 
 usage :: IO ()
 usage = let cs = 
-               [ ["    ",path,"list"]         
-               , ["    ",path,"create",tbl]    
-               , ["    ",path,"drop  ",tbl]    
-               , ["    ",path,"clear ",tbl]     
-               , ["{*} ",path,"insert",atbl,key,val]  
-               , ["{*} ",path,"delete",atbl,key]  
-               , ["{*} ",path,"keys  ",atbl]         
-               , ["{*} ",path,"vals  ",atbl]         
-               , ["{*} ",path,"lookup",atbl,key]  
-               -- , ["{*} ",path,"toList   ",atbl]         
+               [ ["    ","list"]
+               , ["    ","create",tbl]
+               , ["    ","drop  ",tbl]
+               , ["    ","clear ",tbl]
+               , ["{*} ","insert",atbl,key,val]
+               , ["{*} ","delete",atbl,key]
+               , ["{*} ","keys  ",atbl]
+               , ["{*} ","vals  ",atbl]
+               , ["{*} ","lookup",atbl,key]
+               -- , ["{*} ",path,"toList   ",atbl]
                  -- Variation of toList
-               , ["    ",path,"show  ",mtbl]
+               , ["    ","show  ",mtbl]
                ]
             ds=[ -- Copy commands
-                 ["{+} copyTable",bool,path,tbl,path]
-               , ["{+} copyTable",bool,path,tbl,path,tbl]
+                 ["{+} copyTable",bool,path,tbl,path,mtbl]
                ]
             path = "<path>"
             tbl = "<table>"
@@ -86,14 +85,14 @@ usage = let cs =
             bool = "[true|false]"
             fmt xs = " " <> B.unwords xs
             in do
-                putStrLn "Usage: lmdbtool [-p] <Infix-Command>"
-                putStrLn "       lmdbtool [-p] copytTable (true|false) <path> <table> <path> [<table>]"
+                putStrLn "Usage: lmdbtool [-p] <path> <Infix-Command>"
+                putStrLn "       lmdbtool [-p] copyTable (true|false) <path> <table> <path> [<table>]"
                 putStrLn ""
                 putStrLn "  -p  Accept final parameter on stdin"
                 putStrLn ""
                 putStrLn "Infix Commands:" >> mapM_ (B.putStrLn . fmt) cs
                 putStrLn ""
-                putStrLn "Prefix Commands:" >> mapM_ (B.putStrLn . fmt) ds
+                putStrLn "Prefix Command:" >> mapM_ (B.putStrLn . fmt) ds
                 putStrLn ""
                 putStrLn "Notes:  {*} These commands accept ‘@’ as name of Main table (internalUnamedDB)."
                 putStrLn "            To match library, ‘lookupVal’ is accepted as an alias for ‘lookup’."
