@@ -26,7 +26,7 @@ globalDBS = unsafePerformIO $ newEmptyMVar
 createTable1 = do
     env <- readMVar globalDBS
     putStrLn "Creating table1 with DUPSORT flag."
-    createDupDB env "table1"
+    createAppendDupDB env "table1"
 
 withSystemTempDirectory0 _ f = f "DBFOLDER"
 
@@ -51,7 +51,7 @@ initGlobalEnv = withSystemTempDirectory0 "checkLMDBXXXX" $ \dir -> do
     createTable1
 
 withGlobal = bracket (readMVar globalDBS ) shutDownDBS 
-withTable1 = bracket (readMVar globalDBS >>= flip openDupDB "table1") closeDB 
+withTable1 = bracket (readMVar globalDBS >>= flip openAppendDupDB "table1") closeDB 
 
 -- | 'prop_always' always succeeds, just testing my quickcheck understanding
 -- prop_always = forAll (arbitrary :: Gen Int) (const True)

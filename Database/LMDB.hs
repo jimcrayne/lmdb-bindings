@@ -98,33 +98,44 @@ module Database.LMDB
 
     -- ** Public interface.
     , DBS
+    -- *** Working with arbitrary Environments
     , withDBSDo
     , withManyDBSDo
     , withDBSCreateIfMissing
     , initDBS
     , openDBS
     , shutDownDBS 
+    -- **** Query for open environment(s) (Process Globals)
+    , isOpenEnv
+    , listEnv
+    -- *** Opening and closing lookup tables(‘datbases’)
     , createDB
+    , createAppendDB
     , openDB
+    , openAppendDB
     , createDupsortDB
-    , createDupDB
+    , createAppendDupDB
     , openDupsortDB
-    , openDupDB
+    , openAppendDupDB
+    , unnamedDB
     , closeDB
-    , lengthDB
+    -- *** Edit tables
     , dropDB
     , delete
     , add
-    -- ** Internal and/or Unsafe Functions (DBS Interface)
+    -- *** Table properties
+    , lengthDB
+    -- *** Unsafe Functions (DBS Interface)
+    -- These functions may result in dangling pointers if not used with care.
     , unsafeFetch
-    , getDBFlags
-    , internalOpenDB
-    , internalUnamedDB
     , unsafeDumpToList
     , unsafeDumpToListOp
-    -- ** Query for open environment(s) (Process Globals)
-    , isOpenEnv
-    , listEnv
+    -- ** Internal Functions (DBS Interface)
+    -- These functions expose aspects of the interface that are subject to change.
+    -- They are provided, but please prefer the public interface.
+    , internalGetDBFlags
+    , internalOpenDB
+    , openAppendDBFlags
     -- * Higher Level Atomic functions using file paths and names only
     , listTables
     , listTablesCreateIfMissing
@@ -493,6 +504,9 @@ shutDownDBS (DBS env dir emvar)= do
             putMVar emvar False
         else putMVar emvar open
 
+-- | Like 'openDB', but specify LMDB flags.
+--  This function is considered internal because it exposes the MDB_DbFlag type.
+--  Consider using 'openDupsortDB' or 'createDupsortDB' ...
 internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
 internalOpenDB flags (DBS env dir eMvar) name = do 
     e <- readMVar eMvar
@@ -506,8 +520,10 @@ internalOpenDB flags (DBS env dir eMvar) name = do
        else isShutdown 
     where isShutdown = error ("Cannot open '" ++ S.unpack name ++ "' due to environment being shutdown.") 
 
-internalUnamedDB ::  DBS -> IO DBHandle
-internalUnamedDB (DBS env dir eMvar) = do 
+-- | unnamedDB dbs
+-- get implicit main ‘database’.
+unnamedDB ::  DBS -> IO DBHandle
+unnamedDB (DBS env dir eMvar) = do 
     e <- readMVar eMvar
     if e 
        then bracket (mdb_txn_begin env Nothing False)
@@ -520,26 +536,25 @@ internalUnamedDB (DBS env dir eMvar) = do
     where isShutdown = error ("Cannot open unamed db due to environment being shutdown.") 
           flags = []
 
--- createDB db name
+-- | createDB db name
 -- Opens the specified named database, creating one if it does not exist.
 createDB ::  DBS -> ByteString -> IO DBHandle
 createDB = internalOpenDB [MDB_CREATE]
 
--- createDupsortDB db name
+-- | createAppendDB db name
+-- Like 'createDB' but the data comparison function is set to always return 1
+createAppendDB ::  DBS -> ByteString -> IO DBHandle
+createAppendDB dbs name = openAppendDBFlags [MDB_CREATE] dbs name
+
+-- | createDupsortDB db name
 -- Like 'createDB' but the database is flagged DUPSORT
 createDupsortDB ::  DBS -> ByteString -> IO DBHandle
 createDupsortDB = internalOpenDB [MDB_CREATE, MDB_DUPSORT]
 
--- createDupDB db name
+-- | createAppendDupDB db name
 -- Like 'createDupsortDB' but the data comparison function is set to always return 1
-createDupDB ::  DBS -> ByteString -> IO DBHandle
-createDupDB dbs name = do
-    handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB [MDB_CREATE, MDB_DUPSORT] dbs name
-    compare <- wrapCmpFn (\_ _ -> return 1)
-    bracketIfOpen mvar0 (mdb_txn_begin env Nothing False)
-            mdb_txn_commit
-            (\txn -> mdb_set_dupsort txn dbi compare)
-    return handle
+createAppendDupDB ::  DBS -> ByteString -> IO DBHandle
+createAppendDupDB dbs name = openAppendDBFlags [MDB_CREATE,MDB_DUPSORT] dbs name
 
 bracketIfOpen mvar init close action = do
     b <- readMVar mvar
@@ -551,16 +566,28 @@ bracketIfOpen mvar init close action = do
 openDB ::  DBS -> ByteString -> IO DBHandle
 openDB = internalOpenDB []
 
+-- | openAppendDB db name
+-- Open a named database with comparison function set to @\_ _ -> 1@.
+openAppendDB ::  DBS -> ByteString -> IO DBHandle
+openAppendDB dbs name = openAppendDBFlags [] dbs name
+
 -- | openDupsortDB db name
 -- Like 'openDB' but DUPSORT specified.
 openDupsortDB ::  DBS -> ByteString -> IO DBHandle
 openDupsortDB = internalOpenDB [MDB_DUPSORT]
 
--- openDupDB db name
+-- | openAppendDupDB db name
 -- Like 'openDupsortDB' but the data comparison function is set to always return 1
-openDupDB ::  DBS -> ByteString -> IO DBHandle
-openDupDB dbs name = do
-    handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB [MDB_DUPSORT] dbs name
+openAppendDupDB ::  DBS -> ByteString -> IO DBHandle
+openAppendDupDB dbs name = openAppendDBFlags [MDB_DUPSORT] dbs name
+
+-- | openAppendDBFlags
+--  Like 'internalOpenDB' but sets the comparison function to always return 1.
+--  This function is considered internal because it exposes the MDB_DbFlag type.
+--  Consider using 'openAppendDupDB' or 'createAppendDupDB' ...
+openAppendDBFlags :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
+openAppendDBFlags flags dbs name = do
+    handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB flags dbs name
     compare <- wrapCmpFn (\_ _ -> return 1)
     bracketIfOpen mvar0 (mdb_txn_begin env Nothing False)
             mdb_txn_commit
@@ -568,7 +595,7 @@ openDupDB dbs name = do
     return handle
 
 -- openDBForCopy db name
--- Like 'openDupDB' but with explicit flags, and comparsion function
+-- Like 'openAppendDupDB' but with explicit flags, and comparsion function
 openDBForCopy ::  DBS -> ByteString -> [MDB_DbFlag] -> FunPtr MDB_cmp_func -> IO DBHandle
 openDBForCopy dbs name flags compare = do
     handle@(DBH (env,mvar0) dbi flags mvar1) <- internalOpenDB flags dbs name
@@ -591,8 +618,9 @@ closeDB (DBH (env,eMvar) dbi writeflags mvar) = do
       else error ("Cannot close database due to environment being already shutdown.") 
 
 -- | get the flags associated with a table
-getDBFlags :: DBHandle -> IO [MDB_DbFlag]
-getDBFlags (DBH (env,eMvar) dbi writeflags mvar) = do
+--  This function is considered internal because it exposes the MDB_DbFlag type.
+internalGetDBFlags :: DBHandle -> IO [MDB_DbFlag]
+internalGetDBFlags (DBH (env,eMvar) dbi writeflags mvar) = do
     eOpen <- readMVar eMvar
     if eOpen
       then do
@@ -770,20 +798,20 @@ unsafeDumpToListOp flag (DBH (env,emvar) dbi _ mvar) = do
     return $ (concatMap fst xs,finalizeAll)
 
 listTables x = withDBSDo x $ \dbs -> do
-    db <- internalUnamedDB dbs
+    db <- unnamedDB dbs
     (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
     let keys = map (S.copy . fst) keysVals
     force keys `seq` final 
     return keys
 
-listTables' dbs = bracket (internalUnamedDB dbs) closeDB $ \db -> do
+listTables' dbs = bracket (unnamedDB dbs) closeDB $ \db -> do
     (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
     let keys = map (S.copy . fst) keysVals
     force keys `seq` final 
     return keys
 
 listTablesCreateIfMissing x = withDBSCreateIfMissing x $ \dbs -> do
-    db <- internalUnamedDB dbs
+    db <- unnamedDB dbs
     (keysVals,final) <- unsafeDumpToListOp MDB_NEXT_NODUP db
     let keys = map (S.copy . fst) keysVals
     force keys `seq` final 
@@ -895,7 +923,7 @@ valsOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
 --                         thereby preserving order and allowing 
 --                         duplicate key pairs. Usually
 --                         you don't want this. But you probably
---                         do if you used 'openDupDB'.
+--                         do if you used 'openAppendDupDB'.
 --      
 --      dir1 tbl1   - Source environment(path) and table name
 --      dir2 tbl2   - Destination environment(path) and table name
@@ -907,7 +935,7 @@ valsOf' dbs n = bracket (openDB dbs n) closeDB $ \d -> do
 copyTable :: Bool -> FilePath -> S.ByteString -> FilePath -> S.ByteString -> IO [(Bool, (S.ByteString, S.ByteString))]
 copyTable bAllowDuplicates dir1 tbl dir2 tbl2 | dir1 /= dir2 = withManyDBSDo [dir1,dir2] $ \[dbs1,dbs2] -> do
     d <- openDB dbs1 tbl
-    flag <- getDBFlags d
+    flag <- internalGetDBFlags d
     let (<>) = S.append
     -- S.putStrLn (tbl <> S.pack " FLAGS(1): " <> S.pack (show flag))
     compare <- wrapCmpFn (\_ _ -> return 1)
@@ -920,7 +948,7 @@ copyTable bAllowDuplicates dir1 tbl dir2 tbl2 | dir1 /= dir2 = withManyDBSDo [di
     return (zip bools ys)
 copyTable bAllowDuplicates dir1 tbl dir2 tbl2 | dir1 == dir2 && (tbl /= tbl2 || bAllowDuplicates) = withDBSDo dir1 $ \dbs -> do
     d <- openDB dbs tbl
-    flag <- getDBFlags d
+    flag <- internalGetDBFlags d
     let (<>) = S.append
     -- S.putStrLn (tbl <> S.pack " FLAGS(2): " <> S.pack (show flag))
     compare <- wrapCmpFn (\_ _ -> return 1)

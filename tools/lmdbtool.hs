@@ -94,7 +94,7 @@ usage = let cs =
                 putStrLn ""
                 putStrLn "Prefix Command:" >> mapM_ (B.putStrLn . fmt) ds
                 putStrLn ""
-                putStrLn "Notes:  {*} These commands accept ‘@’ as name of Main table (internalUnamedDB)."
+                putStrLn "Notes:  {*} These commands accept ‘@’ as name of Main table (unnamedDB)."
                 putStrLn "            To match library, ‘lookupVal’ is accepted as an alias for ‘lookup’."
                 putStrLn ""
                 putStrLn "        {+} On copy commands, ‘true’ indicates to allow duplicate keys."
@@ -146,7 +146,7 @@ main = do
         _ -> usage
 
 lookupValUnnamed x k = withDBSDo x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     mb <- unsafeFetch d k
     case mb of
         Just (val,final) -> do
@@ -155,28 +155,28 @@ lookupValUnnamed x k = withDBSDo x $ \dbs -> do
         Nothing -> return Nothing
 
 insertKeyUnnamed x k v = withDBSCreateIfMissing x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     add d k v
 deleteKeyUnnamed x k = withDBSCreateIfMissing x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     delete d k 
 
 keysOfUnnamed x = withDBSDo x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     (keysVals,final) <- unsafeDumpToList d
     let keys = map (B.copy . fst) keysVals
     force keys `seq` final 
     return keys
 
 valsOfUnnamed x = withDBSDo x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     (keysVals,final) <- unsafeDumpToList d
     let vals = map (B.copy . snd) keysVals
     force vals `seq` final 
     return vals
 
 toListUnnamed x = withDBSDo x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     (xs,final) <- unsafeDumpToList d
     let ys   = map copy xs
         copy (x,y) = (B.copy x, B.copy y)
@@ -206,7 +206,7 @@ printLengthPrefixed bstr =
                     in B.putStrLn x
 
 putVal x tbl = \str -> withDBSDo x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     mb <- unsafeFetch d (tbl <> "FLAGS")
     let f :: B.ByteString -> Word64
         f x = decode (L.fromChunks [x])
@@ -226,7 +226,7 @@ putVal x tbl = \str -> withDBSDo x $ \dbs -> do
                        _ | (flags `has` flagValBinary) -> fin >> printBinary str
 
 putKey x tbl = \str -> withDBSDo x $ \dbs -> do
-    d <- internalUnamedDB dbs
+    d <- unnamedDB dbs
     mb <- unsafeFetch d (tbl <> "FLAGS")
     let f :: B.ByteString -> Word64
         f x = decode (L.fromChunks [x])
