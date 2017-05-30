@@ -41,7 +41,7 @@ module Database.LMDB
     , transactionTime
     , withRNG
 
-    -- ** Named refs
+    -- ** Persistent mutable refs
     , readDBRef
     , writeDBRef
 
@@ -53,14 +53,14 @@ module Database.LMDB
     , fetch
     , fetchByPrefix
 
-    -- ** Tables with multiple values per key
+    -- ** Multi-valued key/value tables
     , initMulti
     , testMulti
     , insert
     , fetchByPrefixMultiple
     , fetchMultiple
 
-    -- ** Miscelaneous utilities.
+    -- ** Timestamps and randomness
     , TimeStamp
     , toSeconds
     , fromSeconds
@@ -1019,9 +1019,17 @@ instance Monad DB where
 
 -- | Obtain a time-stamp for the current transaction.  Note that repeated calls
 -- to this within a single transaction will always return the same value.
+--
+-- Note that this timestamp is, unfortunately, the time a transaction is
+-- *started*.  Transactions needn't actually be completed in the same order
+-- that they are started.  A transaction cannot obtain it's own completion
+-- time.
 transactionTime :: DB TimeStamp
 transactionTime = DB 2 $ \DBParams {dbtime=stamp} _ -> return $ Right stamp
 
+-- | This function adjusts a 'TimeStamp' using a human-friendly time delta.  It
+-- is useful for checking expiration dates or freshness requirements for
+-- cryptographic signatures.
 addPeriod :: TimeStamp -> Period -> TimeStamp
 addPeriod now period =
 #ifdef NOHOURGLASS
@@ -1049,7 +1057,8 @@ abort message = DB 0 $ \_ _ -> return $ Left er
  where
     er = dbError "aborted" message
 
--- | Like STM\'s 'Control.Monad.STM.orElse'
+-- | This is similar to STM\'s 'Control.Monad.STM.orElse'. It is often used to
+-- handle lookup failures for 'Single' and 'Multi' tables.
 orElse :: DB a -> DB a -> DB a
 orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
     -- Note: orElse needs to use a subtransaction unless the expression
@@ -1079,6 +1088,13 @@ orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
 -- To be clear, the purpose here is to allow branching without requiring use of
 -- the 'Monad' bind operation which has documented drawbacks for the 'DB'
 -- monad.
+--
+-- A common situation is to perform an if/then branch based on the results of
+-- prior 'DB' operations.  Since 'Bool' implements 'Bounded' and 'Enum', we can
+-- use 'cases' to evaluate both possibilities ahead of time (before any
+-- database operations are performed) and determine that in all cases, the
+-- transaction remains read-only.  Thus the write flag needn't be specified for
+-- the underlying LMDB transaction.
 cases :: forall a x. (Bounded a, Enum a) => DB a -> (a -> DB x) -> DB x
 cases toggle op = DB flags $ \stamp txn -> do
     ei <- dbOperation toggle stamp txn
@@ -1608,11 +1624,11 @@ instance MonadRandom DB where
 
 #endif
 
--- | This is only for backward compatibility if 'Crypto.Random.MonadRandom'
--- class is unavailable.  It may be used to make use of the 'DBEnv''s random
--- generator, which is either system entropy or pseudo-random algorithm seeded
--- by a noise file.  See 'openDBEnv'.  The internal 'RNG' state will be
--- appropriately mutated.
+-- | This is only for backward compatibility if the 'Crypto.Random.MonadRandom'
+-- class is unavailable (the "cryptonite" build flag was disabled).  It may be
+-- used to make use of the 'DBEnv' \'s random generator, which is either system
+-- entropy or a pseudo-random algorithm seeded by a noise file.  See
+-- 'openDBEnv'.  The internal 'RNG' state will be appropriately mutated.
 --
 -- Using this, or the 'Crypto.Random.MonadRandom' interface, marks a
 -- transaction as requiring entropy.  Entropy is never used internally by this
