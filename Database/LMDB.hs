@@ -75,18 +75,29 @@ module Database.LMDB
     -- * The Untyped DBS Interface
 
     -- ** Public interface.
+    -- *** Environments
     , DBS
-    -- *** Working with arbitrary Environments
     , withDBSDo
     , withManyDBSDo
     , withDBSCreateIfMissing
     , initDBS
     , openDBS
     , shutDownDBS 
-    -- **** Query for open environment(s) (Process Globals)
+    -- **** Already open?
     , isOpenEnv
     , listEnv
-    -- *** Opening and closing lookup tables(‘datbases’)
+    -- **** High Level Functions
+    , listTables'
+    , deleteTable'
+    , createTable'
+    , clearTable'
+    , insertKey'
+    , deleteKey'
+    , lookupVal'
+    , toList'
+    , keysOf'
+    , valsOf'
+    -- *** Tables
     , createDB
     , createAppendDB
     , openDB
@@ -97,24 +108,36 @@ module Database.LMDB
     , openAppendDupDB
     , unnamedDB
     , closeDB
-    -- *** Edit tables
+    -- **** Editing tables
     , dropDB
     , delete
     , add
-    -- *** Table properties
+    -- **** Table properties
     , lengthDB
-    -- *** Unsafe Functions (DBS Interface)
-    -- These functions may result in dangling pointers if not used with care.
+    -- *** Unsafe Functions
+    --
+    -- |   These functions may result in dangling pointers if not used with care.
+    --
     , unsafeFetch
     , unsafeDumpToList
     , unsafeDumpToListOp
-    -- ** Internal Functions (DBS Interface)
-    -- These functions expose aspects of the interface that are subject to change.
-    -- They are provided, but please prefer the public interface.
+
+    -- ** Internal Functions
+    --
+    -- |  These functions expose aspects of the interface that are subject to change.
+    --    They are provided, but please prefer the public interface.
+    --
     , internalGetDBFlags
     , internalOpenDB
     , openAppendDBFlags
-    -- * Higher Level Atomic functions using file paths and names only
+    -- * High Level Atomic functions
+    --
+    -- | These functions use file paths and names as parameters.
+    --   They do all the work of opening and closing the environment.
+    --   They are similar to the commands of the  @lmdbtool@ utility
+    --   (If you prefer to leave the environment open use functions under
+    --   the heading 'High Level functions'.)
+    --
     , listTables
     , listTablesCreateIfMissing
     , deleteTable
@@ -127,17 +150,6 @@ module Database.LMDB
     , keysOf
     , valsOf
     , copyTable
-    -- * Higher Level DBS functions (DBS is already open, and not to be closed)
-    , listTables'
-    , deleteTable'
-    , createTable'
-    , clearTable'
-    , insertKey'
-    , deleteKey'
-    , lookupVal'
-    , toList'
-    , keysOf'
-    , valsOf'
 
     ) where
 
