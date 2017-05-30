@@ -32,14 +32,14 @@ module Database.LMDB
     , tryDB
 
     -- ** Specifying a Transaction
-    , DB -- (..)
+    , DB
+    , orElse
+    , cases
     , abort
     , dbtrace
     , dblift
     , transactionTime
-
-    , orElse
-    , cases
+    , withRNG
 
     -- ** Named refs
     , readDBRef
@@ -68,31 +68,9 @@ module Database.LMDB
     , addPeriod
     , RNG(..)
     , makeGen
-    , withRNG
 #if defined(VERSION_crypto_random)
     , getRandomBytes
 #endif
-
-    {-
-    -- ** Internal functions
-    , dbError
-    , dbRequiresWrite
-    , dbRequiresStamp
-    , performAtomicIO
-    , buildByteString
-    , withMDB
-    , findForKey
-    , findManyForKey
-    , appendKeyValue
-    , withMDB_
-    , decodeStrict
-    , findMatchHashed
-    , splitKeyChunks
-    , getMany
-    , getManyChunks
-    , dupsortFetch
-    , DBParams(..)
-    -}
 
     -- * The Untyped DBS Interface
 
@@ -255,7 +233,7 @@ import Database.LMDB.BinaryUtil
 
 -- | This type alias comes in two flavors depending on the build settings.  By
 -- default, it will refer to Vincent Hanquez's 'Data.Hourglass.DateTime', but
--- if the "nohourglass" build flag is set, it will instead be
+-- if the "hourglass" build flag is disabled, it will instead be
 -- 'Data.Time.UTCTime'.
 --
 -- Either way, you can use 'toSeconds' and 'fromSeconds' to convert to and from
@@ -1566,6 +1544,15 @@ tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
      where
         v' = Generics.everywhere (Generics.mkT S.copy) v
 
+-- | The 'RNG' type comes in two flavors depending on build settings.  By
+-- default, it will be a wrapper on 'Crypto.Random.SystemDRG' or
+-- 'Crypto.Random.ChaChaDRG' (supplied by the cryptonite package) depending on
+-- whether randomness or repeatable pseudo randomness is selected (the noise
+-- file argument to 'openDBEnv').
+--
+-- If the 'cryptonite' build flag is disabled, however, it is simply an alias
+-- for 'Crypto.Random.SystemRNG' (supplied by the crypto-random package).  This
+-- type handles both system entropy and pseudo-randomness via a noise file.
 #if defined(VERSION_crypto_random)
 type RNG = SystemRNG
 
@@ -1604,8 +1591,17 @@ instance MonadRandom DB where
 
 #endif
 
--- This is only for backward compatibility if MonadRandom class is
--- unavailable.
+-- | This is only for backward compatibility if 'Crypto.Random.MonadRandom'
+-- class is unavailable.  It may be used to make use of the 'DBEnv''s random
+-- generator, which is either system entropy or pseudo-random algorithm seeded
+-- by a noise file.  See 'openDBEnv'.  The internal 'RNG' state will be
+-- appropriately mutated.
+--
+-- Using this, or the 'Crypto.Random.MonadRandom' interface, marks a
+-- transaction as requiring entropy.  Entropy is never used internally by this
+-- library, but the 'Monad' bind operation will mark a transaction as requiring
+-- it.  To avoid that (and to enable read-only transaction when possible),
+-- avoid using '>>='.
 withRNG :: (RNG -> (a,RNG)) -> DB a
 withRNG f = DB 4 $ \DBParams { dbRNG=rngv } _ -> do
     a <- modifyMVar rngv (return . swap . f)

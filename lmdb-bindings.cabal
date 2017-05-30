@@ -16,13 +16,13 @@ build-type:          Custom
 -- extra-source-files:  
 cabal-version:       >= 1.16.0.3
 
-Flag nohourglass
-        Description: Build against older libraries to avoid the hourglass package.
-        Default: False
+Flag hourglass
+        Description: Use the 'hourglass' package for timestamps.  Disable to use 'time'.
+        Default: True
 
 Flag cryptonite
-        Description: Use newer cryptonite-based random interface.
-        Default: False
+        Description: Use cryptonite package for Crypto.Random.  Disable to use 'crypto-random'
+        Default: True
 
 library
   -- other-modules:       
@@ -48,14 +48,12 @@ library
                    , crypto-random
                    , cryptohash >= 0.9 && < 0.12
   else
-     Build-depends:  memory
-  if flag(nohourglass)
+     Build-depends:  memory, cryptonite
+  if !flag(hourglass)
      cpp-options:  -DNOHOURGLASS
      Build-depends: time
   else
      Build-depends: hourglass
-     if flag(cryptonite)
-             Build-depends: cryptonite
 
   build-tools: hsc2hs
   c-sources: pagesize.c
