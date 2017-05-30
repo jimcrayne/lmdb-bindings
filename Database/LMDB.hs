@@ -422,7 +422,7 @@ initDBSOptions dir mbMaxReader mbMaxDb options = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
     let registryMVar = declareMVar "LMDB Environments" h
     registry <- takeMVar registryMVar -- lock registry
-    mbAlreadyOpen <- H.lookup registry (fromString dir)
+    mbAlreadyOpen <- H.lookup registry (packUtf8 dir)
     case mbAlreadyOpen of
         Just dbs@(DBS env _ mvar) -> do
             isOpen <- readMVar mvar
@@ -436,7 +436,7 @@ initDBSOptions dir mbMaxReader mbMaxDb options = do
         Nothing -> do
             (env',mvar') <- newEnv dir Nothing
             let retv = DBS env' dir mvar'
-            H.insert registry (fromString dir) retv
+            H.insert registry (packUtf8 dir) retv
             putMVar registryMVar registry -- unlock registry
             return retv
     where
