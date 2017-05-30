@@ -101,5 +101,6 @@ Executable lmdbtool
                 , deepseq
                 , process
                 , binary
+                , directory
   hs-source-dirs: tools
   main-is:        lmdbtool.hs

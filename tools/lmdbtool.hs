@@ -15,6 +15,8 @@ import Control.DeepSeq (force)
 import System.Process
 import Database.LMDB.Flags
 import Data.Word
+import Data.List (sortBy)
+import Data.Ord (comparing)
 import Data.Int
 import Data.Bits
 import Data.Binary
@@ -24,46 +26,83 @@ import qualified Data.ByteString.Internal          as S
 import Foreign.Marshal.Alloc
 import Foreign.ForeignPtr
 import Control.Exception
+import System.Directory
 
+aliases = [ ("listTables","list")
+          , ("createTable","create")
+          , ("deleteTable","drop")
+          , ("clearTable","clear")
+          , ("insertKey","insert")
+          , ("deleteKey","delete")
+          , ("lookupVal","lookup")
+          , ("keysOf","keys")
+          , ("valsOf","vals")
+          ]
 
-    
-    
+formatAssocList width indent as = h width (B.length indent) indent as
+    where
+        h _ _ str [] = str
+        h max tot str ((x,y):ys) = if l x y ys + tot > max then let str' = B.concat [str,"\n",indent,b x y ys]
+                                                                    in h max 0 str' ys
+                                                           else let str' = B.concat [str,b x y ys]
+                                                                    in h max (tot + l x y ys) str' ys
+        b x y xs = B.concat [x," => ",y,if null xs then "\n" else ", "]
+        l x y xs = B.length (b x y xs)
+
+unaliasArgs args | length args < 2 = return args
+unaliasArgs args@(a:b:args') = do
+    bPath <- doesDirectoryExist (B.unpack a)
+    if bPath then return (a:f b:args')
+             else return args
+    where f x = case lookup x aliases of
+                    Just y  -> y
+                    Nothing -> x
 
 usage :: IO ()
 usage = let cs = 
-               [ ["    listTables",path]         
-               , ["    createTable",path,tbl]    
-               , ["    deleteTable",path,tbl]    
-               , ["    clearTable",path,tbl]     
-               , ["    insertKey",path,tbl,key,val]  
-               , ["    deleteKey",path,tbl,key]  
-               , ["{*} keysOf",path,tbl]         
-               , ["{*} valsOf",path,tbl]         
-               , ["    lookupKey",path,tbl,key]  
-               , ["{*} toList",path,tbl]         
+               [ ["    ",path,"list"]         
+               , ["    ",path,"create",tbl]    
+               , ["    ",path,"drop  ",tbl]    
+               , ["    ",path,"clear ",tbl]     
+               , ["{*} ",path,"insert",atbl,key,val]  
+               , ["{*} ",path,"delete",atbl,key]  
+               , ["{*} ",path,"keys  ",atbl]         
+               , ["{*} ",path,"vals  ",atbl]         
+               , ["{*} ",path,"lookup",atbl,key]  
+               -- , ["{*} ",path,"toList   ",atbl]         
                  -- Variation of toList
-               , ["    show",path,tbl]
-               , ["    show",path]
-                 -- Copy commands
-               , ["{*} copy1",bool,path,tbl,key,path]
-               , ["{*} copy1",bool,path,tbl,key,path,tbl]
-               , ["{*} copy1",bool,path,tbl,key,path,tbl,key]
-               , ["    copyTable",bool,path,tbl,path]
-               , ["    copyTable",bool,path,tbl,path,tbl]
+               , ["    ",path,"show  ",mtbl]
+               ]
+            ds=[ -- Copy commands
+                 ["{+} copyTable",bool,path,tbl,path]
+               , ["{+} copyTable",bool,path,tbl,path,tbl]
                ]
             path = "<path>"
             tbl = "<table>"
+            mtbl = "[<table>]"
+            atbl = "(@|<table>)"
             key = "<key>"
             val = "<value>"
             bool = "[true|false]"
             fmt xs = " " <> B.unwords xs
             in do
-                putStrLn "Usage: ldmbtool <command> [<options>]\n"
-                putStrLn "Commands:" >> mapM_ (B.putStrLn . fmt) cs
+                putStrLn "Usage: lmdbtool [-p] <Infix-Command>"
+                putStrLn "       lmdbtool [-p] copytTable (true|false) <path> <table> <path> [<table>]"
                 putStrLn ""
-                putStrLn "Notes:"
-                putStrLn "   {*} These commands accept ‘@’ as name of Main table (internalUnamedDB)."
-                putStrLn "   On copy commands, ‘true’ indicates to allow duplicate keys."
+                putStrLn "  -p  Accept final parameter on stdin"
+                putStrLn ""
+                putStrLn "Infix Commands:" >> mapM_ (B.putStrLn . fmt) cs
+                putStrLn ""
+                putStrLn "Prefix Commands:" >> mapM_ (B.putStrLn . fmt) ds
+                putStrLn ""
+                putStrLn "Notes:  {*} These commands accept ‘@’ as name of Main table (internalUnamedDB)."
+                putStrLn "            To match library, ‘lookupVal’ is accepted as an alias for ‘lookup’."
+                putStrLn ""
+                putStrLn "        {+} On copy commands, ‘true’ indicates to allow duplicate keys."
+                putStrLn "            To copy a single key, pipe the output of ‘lookup’ into ‘insert’."
+                putStrLn ""
+                putStrLn "Aliases:"
+                B.putStrLn (formatAssocList 80 "        " (sortBy (comparing fst) aliases))
 
 main :: IO ()
 main = do
@@ -76,40 +115,52 @@ main = do
             putStrLn "---"
             B.putStr tbl >> putStrLn ":"
             mapM_ (putPairI 2) =<< toList (u path) tbl
-    case args of
-        ["listTables",path]         -> mapM_ B.putStrLn =<< listTables (u path)
-        ["createTable",path,tbl]    -> v $ createTable (u path) tbl
-        ["deleteTable",path,tbl]    -> v $ deleteTable (u path) tbl
-        ["clearTable",path,tbl]     -> clearTable (u path) tbl
-        ["insertKey",path,tbl,key,val] -> v $ insertKey (u path) tbl key val
-        ["deleteKey",path,tbl,key]  -> v $ deleteKey (u path) tbl key
-        ["keysOf",path,"@"]         -> mapM_ B.putStrLn =<< keysOfUnnamed (u path)
-        ["keysOf",path,tbl]         -> mapM_ (putKey (u path) tbl) =<< keysOf (u path) tbl
-        ["valsOf",path,"@"]         -> mapM_ B.putStrLn =<< valsOfUnnamed (u path)
-        ["valsOf",path,tbl]         -> mapM_ (putVal (u path) tbl) =<< valsOf (u path) tbl
-        ["lookupVal",path,tbl,key]  -> B.putStrLn =<< fromMaybe "" <$> lookupVal (u path) tbl key
-        ["toList",path,"@"]         -> print =<< toListUnnamed (u path)
-        ["toList",path,tbl]         -> print =<< toList (u path) tbl
+    args' <- if take 1 args == ["-p"] then drop 1 . (args ++) . (:[]) <$> B.getLine
+                                      else return args
+    
+    args'' <- unaliasArgs args'
+    case args'' of
+        [path,"list"]               -> mapM_ B.putStrLn =<< listTables (u path)
+        [path,"create",tbl]         -> v $ createTable (u path) tbl
+        [path,"drop",tbl]           -> v $ deleteTable (u path) tbl
+        [path,"clear",tbl]          -> clearTable (u path) tbl
+        [path,"insert","@",key,val] -> v $ insertKeyUnnamed (u path) key val
+        [path,"insert",tbl,key,val] -> v $ insertKey (u path) tbl key val
+        [path,"delete","@",key]     -> v $ deleteKeyUnnamed (u path) key
+        [path,"delete",tbl,key]     -> v $ deleteKey (u path) tbl key
+        [path,"keys","@"]         -> mapM_ B.putStrLn =<< keysOfUnnamed (u path)
+        [path,"keys",tbl]         -> mapM_ (putKey (u path) tbl) =<< keysOf (u path) tbl
+        [path,"vals","@"]         -> mapM_ B.putStrLn =<< valsOfUnnamed (u path)
+        [path,"vals",tbl]         -> mapM_ (putVal (u path) tbl) =<< valsOf (u path) tbl
+        [path,"lookup","@",key]  -> B.putStrLn =<< fromMaybe "" <$> lookupValUnnamed (u path) key
+        [path,"lookup",tbl,key]  -> B.putStrLn =<< fromMaybe "" <$> lookupVal (u path) tbl key
+        -- [path,"toList","@"]         -> print =<< toListUnnamed (u path)
+        -- [path,"toList",tbl]         -> print =<< toList (u path) tbl
         -- Variation of toList
-        ["show",path,tbl]           -> mapM_ putPair =<< toList (u path) tbl
-        ["show",path]               -> mapM_ (putTbl path) =<< listTables (u path)
+        [path,"show",tbl]           -> mapM_ putPair =<< toList (u path) tbl
+        [path,"show"]               -> mapM_ (putTbl path) =<< listTables (u path)
         -- Copy commands
-        ["copy1",path,"@",key,dest]          -> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,tbl,key,dest]          -> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,"@",key,dest,tbl2]     -> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,"@",key,dest,"@"]      -> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,tbl,key,dest,tbl2]     -> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,tbl,key,dest,"@"]      -> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,"@",key,dest,tbl2,key2]-> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,"@",key,dest,"@", key2]-> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,tbl,key,dest,tbl2,key2]-> putStrLn "Copy1 command is not yet implemented."
-        ["copy1",path,tbl,key,dest,"@",key2] -> putStrLn "Copy1 command is not yet implemented."
         ["copyTable","true",path,tbl,dest]      -> v $ copyTable True (u path) tbl (u dest) tbl
         ["copyTable","false",path,tbl,dest]     -> v $ copyTable False (u path) tbl (u dest) tbl
         ["copyTable","true",path,tbl,dest,tbl2] -> v $ copyTable True (u path) tbl (u dest) tbl2
         ["copyTable","false",path,tbl,dest,tbl2]-> v $ copyTable False (u path) tbl (u dest) tbl2
         _ -> usage
 
+lookupValUnnamed x k = withDBSDo x $ \dbs -> do
+    d <- internalUnamedDB dbs
+    mb <- unsafeFetch d k
+    case mb of
+        Just (val,final) -> do
+            force val `seq` final
+            return (Just val)
+        Nothing -> return Nothing
+
+insertKeyUnnamed x k v = withDBSCreateIfMissing x $ \dbs -> do
+    d <- internalUnamedDB dbs
+    add d k v
+deleteKeyUnnamed x k = withDBSCreateIfMissing x $ \dbs -> do
+    d <- internalUnamedDB dbs
+    delete d k 
 
 keysOfUnnamed x = withDBSDo x $ \dbs -> do
     d <- internalUnamedDB dbs
