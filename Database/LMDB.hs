@@ -869,16 +869,18 @@ lookupVal x n k = withDBSDo x $ \dbs -> do
     mb <- unsafeFetch d k
     case mb of
         Just (val,final) -> do
-            force val `seq` final
-            return (Just val)
+            let x = S.copy val
+            force x `seq` final
+            return (Just x)
         Nothing -> return Nothing
 
 lookupVal' dbs n k = bracket (openDB dbs n) closeDB $ \d -> do
     mb <- unsafeFetch d k
     case mb of
         Just (val,final) -> do
-            force val `seq` final
-            return (Just val)
+            let x = S.copy val
+            force x `seq` final
+            return (Just x)
         Nothing -> return Nothing
 
 toList x n = withDBSDo x $ \dbs -> do
