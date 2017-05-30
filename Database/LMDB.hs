@@ -1091,7 +1091,7 @@ orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
 -- elegantly specified using the \"LambdaCase\" haskell syntax.
 --
 -- The astute reader will notice that its type is similar to that of '>>=' but
--- with restrictions that the result implement 'Bounded' and 'Enum'.  This
+-- with restrictions that the input implement 'Bounded' and 'Enum'.  This
 -- similarity is intentional.  Use this instead of '>>=' if you want to avoid
 -- setting the write-acces, entropy, and timestamp flags unneccessarily.
 cases :: forall a x. (Bounded a, Enum a) => DB a -> (a -> DB x) -> DB x
