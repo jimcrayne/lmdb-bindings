@@ -3,12 +3,12 @@
 
 name:                lmdb-bindings
 version:             0.1.2.0
-synopsis:            Persistent Key,Value Store implemented on top of LMDB
+synopsis:            Various interfaces to LMDB databases, and a command line util.
 -- description:         
-homepage:            https://github.com/JimCrayne/kvstore-lmdb
+homepage:            https://github.com/JimCrayne/lmdb-bindings
 license:             BSD2
 license-file:        LICENSE
-author:              James Crayne, David Barbour
+author:              James Crayne, Joseph Crayne, David Barbour
 maintainer:          jim.crayne@gmail.com
 -- copyright:           
 category:            Database
@@ -25,6 +25,15 @@ Flag cryptonite
         Default: True
 
 library
+  exposed-modules:
+    Database.LMDB
+    Database.LMDB.BinaryUtil
+    Database.LMDB.Flags
+    Database.LMDB.Raw
+    Database.LMDB.Raw.Types
+    Database.LMDB.Macros
+    Data.Global.Internal
+    PackUtf8
   -- other-modules:       
   -- other-extensions:    
   build-depends:  base >=4.6 && < 5, array
@@ -58,15 +67,6 @@ library
   build-tools: hsc2hs
   c-sources: pagesize.c
   other-extensions: DeriveDataTypeable
-  exposed-modules:
-    Database.LMDB
-    Database.LMDB.BinaryUtil
-    Database.LMDB.Flags
-    Database.LMDB.Raw
-    Database.LMDB.Raw.Types
-    Database.LMDB.Macros
-    Data.Global.Internal
-    PackUtf8
   default-language:    Haskell2010
   extra-libraries: lmdb
 
