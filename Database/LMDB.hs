@@ -379,6 +379,12 @@ declareMVar s _ = error ("ERROR: Cannot fectch global MVar named " ++ show s)
 
 {-# NOINLINE _registryMVar #-}
 _registryMVar = unsafePerformIO $ (H.new >>= newMVar) :: MVar (HashTable ByteString DBS)
+-- The above unsafePerformIO hack global reference could equivalently be declared using
+-- a macro from Data.Global.Internal like so:
+--
+-- declare [t|MVar (HashTable ByteString DBS)|]
+--         [| H.new >>= newMVar |]
+--         "_registryMVar"
 
 -- | Is this 'Filepath' a currently open LMDB Environment?
 isOpenEnv :: FilePath -> IO Bool
@@ -1813,5 +1819,4 @@ getRange txn dbi start = do
                 -- pointer's finalizer.
                 finalizeForeignPtr ptr
                 return []
-
 
