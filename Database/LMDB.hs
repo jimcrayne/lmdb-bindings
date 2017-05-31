@@ -46,6 +46,15 @@ module Database.LMDB
     , writeDBRef
 
     -- ** Simple key/value tables
+    --
+    -- | Single-valued maps come in two flavors.  The 'BoundedKey' (or
+    -- equivelently, 'BoundedKeyValue') flavor uses a vanilla LMDB table with
+    -- keys and values straight-forwardly serialized and keys must adhere to
+    -- LMDB limitations (typically a 511 byte maximum).  The 'HashedKey' flavor
+    -- performs a 64-bit murmer hash on the key and uses the result as the LMDB
+    -- key.  For each hashed key, a list of triples of the form (serialized
+    -- key, 32-bit value length, serialized value) is stored which allows the
+    -- implementation to account for hash collisions.
     , initSingle
     , testSingle
     , store
@@ -54,6 +63,24 @@ module Database.LMDB
     , fetchByPrefix
 
     -- ** Multi-valued key/value tables
+    --
+    -- | Multi-valued maps come in three flavors.
+    --
+    -- The 'BoundedKey' flavor straight-forwardly serializes haskell valued
+    -- keys to use LMDB keys.  All values for a given key are stored as a
+    -- single LMDB value which consist of the concatenated serialization.  Note
+    -- that the 'Binary' serialization instance is assumed to be able to parse
+    -- a value from the front of a 'L.ByteString' without consuming the
+    -- remaining data.  Keys must meet the LMDB requirements (typically a 511
+    -- byte maximum).
+    --
+    -- The 'BoundedKeyValue' flavor uses LMDB's DUPSORT feature to implement
+    -- the multi-map.  Both keys and values are straight forwardly serialized
+    -- and both must meet LMDB's rquirements (typically a 511 byte maximum).
+    --
+    -- The 'HashedKey' flavor is implemented, on disk, exactly like a 'Single'
+    -- 'HashedKey' table.  The difference is that 'insert' and 'remove' will
+    -- allow multiple values per key.
     , initMulti
     , testMulti
     , insert
@@ -1447,21 +1474,29 @@ insert (Multi dbname dbivar) k val =
 --
 -- If 'Nothing' is specified for the value, then all values associated with the
 -- given key will be removed.  Otherwise, only matching values will be removed.
---
--- __WARNING__: This function is not yet implemented for the 'BoundedKey'
--- flavor.  Only the DUPSORT variation ('BoundedKeyValue') and the 'HashedKey'
--- variation are implemented.  TODO: fix this.
 remove :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> Maybe v -> DB ()
 remove (Multi dbname dbivar) k mbval =
     case flavor (Proxy :: Proxy f) of
-        BoundedKey      -> DB 1 $ \_ txn -> error "todo: BoundedKey varient of remove"
+        BoundedKey      -> case mbval of
+            Nothing  -> DB 1 $ _del_bounded dbname dbivar k Nothing []
+            Just val -> DB 1 $ \params txn -> do
+                dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+                withMDB_ (encodeStrict k) $ \key -> do
+                    mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
+                    let xbs :: [(v,L.ByteString)]
+                        xbs = maybe [] (runGet getManyChunks) mbs
+                        encoded = encode val
+                        keepers = filter (\(_,storedv) -> storedv/=encoded) xbs
+                    case keepers of
+                        [] -> _del_bounded dbname dbivar k Nothing [] params txn
+                        ks -> withMDB_ (L.toStrict $ L.concat $ map snd ks) $ \valmdb -> do
+                                void $ mdb_put (compileWriteFlags []) txn dbi key valmdb
+                                return $ Right ()
 
         BoundedKeyValue -> case mbval of
             Nothing  -> DB 1 $ _del_bounded dbname dbivar k Nothing [MDB_DUPSORT]
             Just val -> DB 1 $ \params txn -> do
-                let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
-                withForeignPtr fptr $ \ptr -> do
-                    let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
+                withMDB_ (encodeStrict val) $ \valmdb -> do
                     _del_bounded dbname dbivar k (Just valmdb) [MDB_DUPSORT] params txn
 
         HashedKey       -> case mbval of
