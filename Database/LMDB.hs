@@ -1270,7 +1270,7 @@ _del_bounded dbname dbivar k mbval flags _ txn = do
 
 _del_hashed ::
     (Binary k, Eq k) =>
-    ByteString -> TVar (Pending MDB_dbi) -> k -> Maybe MDB_val
+    ByteString -> TVar (Pending MDB_dbi) -> k -> Maybe S.ByteString
         -> DBParams -> MDB_txn -> IO (Either a ())
 _del_hashed dbname dbivar k mbval _ txn = do
             dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
@@ -1280,14 +1280,18 @@ _del_hashed dbname dbivar k mbval _ txn = do
                 let key = MDB_val 8 (castPtr pw)
                 mbs <- mdb_get txn dbi key >>= traverse buildByteString
                 case runGet (splitKeyChunks k) $ L.fromChunks $ maybeToList mbs of
-                    []  -> void $ mdb_del txn dbi key mbval
+                    []  -> {- case mbval of -}
+                            {- Nothing  -> -} void $ mdb_del txn dbi key Nothing
+                            {- Just val -> void $ withMDB_ val (mdb_del txn dbi key . Just) -}
                     kvs -> do
-                        -- TODO: If mbval is not Nothing, require match for deletion.
-                        let (keepers,losers) = partition (\(storedk,_) -> storedk/=k) kvs
+                        let isKeeper = case mbval of
+                                        Nothing -> \(k', _)  -> k'/=k
+                                        Just v  -> \(k', v') -> k'/=k || v'/=L.fromChunks [v]
+                            (keepers,losers) = partition isKeeper kvs
                             bs = L.concat $ map snd $ keepers
                         when (not $ null losers) $ do
                             if L.null bs
-                              then void $ mdb_del txn dbi key mbval
+                              then void $ mdb_del txn dbi key Nothing
                               else withMDB_ (S.concat $ L.toChunks bs) $ \val -> do
                                 void $ mdb_put (compileWriteFlags []) txn dbi key val
             return (Right ())
@@ -1444,9 +1448,9 @@ insert (Multi dbname dbivar) k val =
 -- If 'Nothing' is specified for the value, then all values associated with the
 -- given key will be removed.  Otherwise, only matching values will be removed.
 --
--- __WARNING__: This function is not yet implemented for the 'BoundedKey' and
--- 'HashedKey' flavors.  Only the DUPSORT variation ('BoundedKeyValue') is
--- implemented.  TODO: fix this.
+-- __WARNING__: This function is not yet implemented for the 'BoundedKey'
+-- flavor.  Only the DUPSORT variation ('BoundedKeyValue') and the 'HashedKey'
+-- variation are implemented.  TODO: fix this.
 remove :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> Maybe v -> DB ()
 remove (Multi dbname dbivar) k mbval =
     case flavor (Proxy :: Proxy f) of
@@ -1460,7 +1464,9 @@ remove (Multi dbname dbivar) k mbval =
                     let valmdb = MDB_val (fromIntegral len) (ptr `plusPtr` offset)
                     _del_bounded dbname dbivar k (Just valmdb) [MDB_DUPSORT] params txn
 
-        HashedKey       -> DB 1 $ \_ txn -> error "todo: HashedKey varient of remove"
+        HashedKey       -> case mbval of
+            Nothing  -> DB 1 $ _del_hashed dbname dbivar k Nothing
+            Just val -> DB 1 $ _del_hashed dbname dbivar k (Just $ encodeStrict val)
 
 -- | Create an empty multi-map table.  Use the 'database' template-haskell
 -- macro to declare a table like so:
