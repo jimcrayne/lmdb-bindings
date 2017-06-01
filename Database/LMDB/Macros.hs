@@ -48,6 +48,8 @@ module Database.LMDB.Macros
     , Single(..)
     , Multi(..)
     , Pending(..)
+    , performAtomicIO
+    , tryAtomicIO
     ) where
 
 import Data.Maybe
@@ -57,6 +59,7 @@ import Control.Applicative
 import qualified Data.ByteString.Char8 as Char8
 import Data.Global.Internal
 import qualified Data.ByteString                   as S
+import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM.TVar
 import Data.Typeable
 import Debug.Trace
@@ -75,7 +78,7 @@ data DBFlavor
 data Proxy (f :: DBFlavor) = Proxy
 #endif
 
-type MapName = S.ByteString
+type MapName = String
 type KeyName = S.ByteString
 
 -- | This type is used to represent the state of a resource that must be
@@ -87,6 +90,50 @@ data Pending a
     = NotStarted  -- ^ The resource is not initialized.
     | Pending     -- ^ Initialization is in progress.
     | Completed a -- ^ The fully-initialized value.
+
+-- | Obtain a 'Completed' value.  If it was not initialized and not 'Pending'
+-- in any other thread, then initialization will occur in this thread.
+performAtomicIO :: TVar (Pending a) -> IO a -> IO a
+performAtomicIO var action = do
+    getdatum <- STM.atomically $ do
+        progress <- readTVar var
+        case progress of
+            NotStarted -> do
+                writeTVar var Pending
+                return $ do
+                    datum <- action
+                    STM.atomically $ writeTVar var (Completed datum)
+                    return datum
+            Pending -> STM.retry
+            Completed datum -> return $ return datum
+    getdatum
+
+
+-- | Like 'performAtomicIO' except initialization failure is allowed.  In the
+-- case of failure, the variable is left in the 'NotStarted' state so that the
+-- action may be retried.  Failure is indicated by the 'Left' result.
+tryAtomicIO :: TVar (Pending a) -> IO (Either e a) -> IO (Either e a)
+tryAtomicIO var action = do
+    getdatum <- STM.atomically $ do
+        progress <- readTVar var
+        case progress of
+            NotStarted -> do
+                writeTVar var Pending
+                return $ do
+                    putStrLn $ "pending tryAtomicIO ..."
+                    edatum <- action
+                    putStrLn $ "setting TVar..."
+                    case edatum of
+                        Right x -> STM.atomically $ writeTVar var (Completed x)
+                        Left _  -> STM.atomically $ writeTVar var NotStarted
+                    putStrLn $ "... completed or not-started tryAtomicIO"
+                    return edatum
+            Pending -> STM.retry
+            Completed datum -> return $ return (Right datum)
+    getdatum
+
+
+
 
 -- | A persistent mutable reference that refers to a value within an LMDB
 -- database.  Although the constructor is exported, it is preferred that you
@@ -120,6 +167,7 @@ tblFlavor :: forall m f k v. FlavorKind f => m f k v -> DBFlavor
 tblFlavor _ = flavor (Proxy :: Proxy f)
 
 
+{-
 dbref :: String -> Q Type -> Q [Dec]
 dbref name typ = declareRef ''DBRef mkref name typ
  where
@@ -135,6 +183,7 @@ dbmap name typ = declare typ mkref name
         t <- typ
         if isMulti t then [| Multi  (Char8.pack name) <$> newTVarIO NotStarted |]
                      else [| Single (Char8.pack name) <$> newTVarIO NotStarted |]
+-}
 
 -- | Place-holder expression designed to be replaced by the 'database' macro.
 -- If you use this outside of a 'database' declaration, it will simply expand
@@ -153,7 +202,7 @@ database qsigs = do
     concat <$> sequence (map gen sigs) -- :: Q [Dec]
  where
 
-    gen (SigD name typ) = maybe (return [SigD name typ]) (flip (declareName typ) name) mkref
+    gen (SigD name typ) = maybe (return [SigD name' typ]) (flip (declareName typ) name') mkref
      where
         isMulti (AppT c _) = isMulti c
         isMulti t = t == ConT ''Multi
@@ -166,12 +215,14 @@ database qsigs = do
 
         mapname = nameBase name
 
+        name' = mkName mapname
+
         mkref =
             case typ of
-                _ | isMulti typ -> Just [| Multi  (Char8.pack mapname) <$> newTVarIO NotStarted |]
-                _ | isSingle typ -> Just [| Single (Char8.pack mapname) <$> newTVarIO NotStarted |]
-                _ | isDBRef typ -> Just [| DBRef (Char8.pack mapname) <$> newTVarIO NotStarted |]
-                _ -> Nothing
+                _ | isMulti  typ -> Just [| Multi  mapname <$> newTVarIO NotStarted |]
+                _ | isSingle typ -> Just [| Single mapname <$> newTVarIO NotStarted |]
+                _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) <$> newTVarIO NotStarted |]
+                _                -> Nothing
 
     -- alternate: ValD (VarP version2_1627446612)
     --                 (NormalB (SigE (ConE GHC.Tuple.())

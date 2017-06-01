@@ -94,6 +94,7 @@ module Database.LMDB
     , fromSeconds
     , Period(..)
     , addPeriod
+    , currentTime
     , RNG(..)
     , makeGen
 #if defined(VERSION_crypto_random)
@@ -297,13 +298,21 @@ toSeconds utc = round $ utcTimeToPOSIXSeconds utc
 
 fromSeconds :: Int64 -> TimeStamp
 fromSeconds s = posixSecondsToUTCTime (realToFrac s)
+
+currentTime :: IO TimeStamp
+currentTime = getCurrentTime
 #else
 type TimeStamp = Hourglass.DateTime
+
 toSeconds :: TimeStamp -> Int64
 toSeconds vincentTime = t
   where (Hourglass.Elapsed (Hourglass.Seconds t)) = Hourglass.timeGetElapsed vincentTime
+
 fromSeconds :: Int64 -> TimeStamp
 fromSeconds t = Hourglass.timeFromElapsed (Hourglass.Elapsed (Hourglass.Seconds t))
+
+currentTime :: IO TimeStamp
+currentTime = Hourglass.dateCurrent
 #endif
 
 
@@ -1153,23 +1162,6 @@ cases toggle op = DB flags $ \stamp txn -> do
     posibilities = [minBound .. maxBound] :: [a]
 
 
-performAtomicIO :: TVar (Pending a) -> IO a -> IO a
-performAtomicIO var action = do
-    getdatum <- STM.atomically $ do
-        progress <- readTVar var
-        case progress of
-            NotStarted -> do
-                writeTVar var Pending
-                return $ do
-                    datum <- action
-                    STM.atomically $ writeTVar var (Completed datum)
-                    return datum
-            Pending -> STM.retry
-            Completed datum -> return $ return datum
-    getdatum
-
-
-
 buildByteString :: MDB_val -> IO S.ByteString
 buildByteString (MDB_val size ptr) = do
     fptr <- newForeignPtr_ ptr
@@ -1247,12 +1239,12 @@ fetch (Single dbname dbivar) k =
         HashedKey       -> DB 0 $ \_ txn -> _hashed txn
  where
     _bounded txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             maybe (Left $ dbError "fetch" "key not found")
                   Right
                <$> withMDB (encodeStrict k) decodeStrict (mdb_get txn dbi)
     _hashed txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
             mb <- with w $ \pw -> do
@@ -1293,20 +1285,20 @@ unstore (Single dbname dbivar) k =
 
 _del_bounded ::
     (Binary k, Eq k) =>
-    ByteString -> TVar (Pending MDB_dbi) -> k -> Maybe MDB_val -> [MDB_DbFlag]
+    MapName -> TVar (Pending MDB_dbi) -> k -> Maybe MDB_val -> [MDB_DbFlag]
         -> DBParams -> MDB_txn -> IO (Either a1 ())
 _del_bounded dbname dbivar k mbval flags _ txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
             _ <- withMDB_ (encodeStrict k) $ \key -> do
                     mdb_del txn dbi key mbval
             return $ Right ()
 
 _del_hashed ::
     (Binary k, Eq k) =>
-    ByteString -> TVar (Pending MDB_dbi) -> k -> Maybe S.ByteString
+    MapName -> TVar (Pending MDB_dbi) -> k -> Maybe S.ByteString
         -> DBParams -> MDB_txn -> IO (Either a ())
 _del_hashed dbname dbivar k mbval _ txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
             with w $ \pw -> do
@@ -1341,7 +1333,7 @@ store (Single dbname dbivar) k val =
         HashedKey       -> DB 1 $ \_ txn -> _hashed txn
  where
     _bounded txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             let flags  = compileWriteFlags [] -- TODO: ?
             _ <- withMDB_ (encodeStrict k) $ \key -> do
                 let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
@@ -1351,7 +1343,7 @@ store (Single dbname dbivar) k val =
             return $ Right ()
 
     _hashed txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             let flags  = compileWriteFlags [] -- TODO: ?
                 encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
@@ -1377,12 +1369,12 @@ fetchMultiple (Multi dbname dbivar) k =
     case flavor (Proxy :: Proxy f) of
         BoundedKeyValue -> DB 0 $ \_ txn -> dupsortFetch dbname dbivar txn k
         BoundedKey ->  DB 0 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             maybe (Right [])
                   Right
                <$> withMDB (encodeStrict k) (runGet getMany . L.fromChunks . (:[]) ) (mdb_get txn dbi)
         HashedKey -> DB 0 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
             vs <- with w $ \pw -> do
@@ -1393,7 +1385,7 @@ fetchMultiple (Multi dbname dbivar) k =
 
 dupsortFetch :: forall k v. (Eq k, Binary k, Binary v) => MapName -> TVar (Pending MDB_dbi) -> MDB_txn -> k -> IO (Either LMDB_Error [v])
 dupsortFetch dbname dbivar txn k = do
-    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) [MDB_DUPSORT]
+    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) [MDB_DUPSORT]
     let encodedKey = encode k
         (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks encodedKey
     withForeignPtr fptr $ \ptr -> do
@@ -1432,7 +1424,7 @@ insert :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v 
 insert (Multi dbname dbivar) k val =
     case flavor (Proxy :: Proxy f) of
         BoundedKey ->  DB 1 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             withMDB_ (encodeStrict k) $ \key -> do
                 mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
                 let xbs :: [(v,L.ByteString)]
@@ -1448,7 +1440,7 @@ insert (Multi dbname dbivar) k val =
             return $ Right ()
 
         BoundedKeyValue -> DB 1 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) [MDB_DUPSORT]
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) [MDB_DUPSORT]
             let flags  = compileWriteFlags [] -- TODO: ?
             _ <- withMDB_ (encodeStrict k) $ \key -> do
                 let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
@@ -1458,7 +1450,7 @@ insert (Multi dbname dbivar) k val =
             return $ Right ()
 
         HashedKey -> DB 1 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
             let flags  = compileWriteFlags [] -- TODO: ?
                 encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
@@ -1486,7 +1478,7 @@ remove (Multi dbname dbivar) k mbval =
         BoundedKey      -> case mbval of
             Nothing  -> DB 1 $ _del_bounded dbname dbivar k Nothing []
             Just val -> DB 1 $ \params txn -> do
-                dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) []
+                dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
                 withMDB_ (encodeStrict k) $ \key -> do
                     mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
                     let xbs :: [(v,L.ByteString)]
@@ -1523,7 +1515,7 @@ initMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
     let flags = case flavor (Proxy :: Proxy f) of
                     BoundedKeyValue -> [MDB_CREATE,MDB_DUPSORT]
                     _               -> [MDB_CREATE]
-    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
     return $ Right ()
 
 -- | Create an empty lookup table within a database.  The table needs to be
@@ -1542,7 +1534,7 @@ initSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
                     BoundedKey      -> [MDB_CREATE]
                     BoundedKeyValue -> [MDB_CREATE]
                     HashedKey       -> [MDB_CREATE]
-    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
     return $ Right ()
 
 -- | Fail the transaction if the given table does not exist.  It is assumed the
@@ -1553,7 +1545,7 @@ testMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
     let flags = case flavor (Proxy :: Proxy f) of
                     BoundedKeyValue -> [MDB_DUPSORT]
                     _               -> []
-    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
     return $ Right ()
 
 -- | Fail the transaction if the specified table does not exist.  See
@@ -1568,7 +1560,7 @@ testSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
                     BoundedKey      -> []
                     BoundedKeyValue -> []
                     HashedKey       -> []
-    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ Char8.unpack dbname) flags
+    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
     return $ Right ()
 
 
@@ -1652,12 +1644,7 @@ tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
  where
     withTxn gv txn = do
         stamp <- if (dbRequiresStamp db_action)
-                    then
-#ifdef NOHOURGLASS
-                        getCurrentTime
-#else
-                        Hourglass.dateCurrent
-#endif
+                    then currentTime
                     else return $ error "BUG: unknown transaction time!"
         ei <- handle (return . Left)
                      (dbOperation db_action (DBParams stamp gv) txn)
