@@ -103,3 +103,13 @@ Executable lmdbtool
                 , directory
   hs-source-dirs: tools
   main-is:        lmdbtool.hs
+
+
+Executable test1
+  Default-Language: Haskell2010
+  build-depends:  lmdb-bindings
+                , base
+                , directory
+  hs-source-dirs: tools
+  main-is:        test1.hs
+
