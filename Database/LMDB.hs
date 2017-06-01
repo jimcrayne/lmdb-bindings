@@ -1043,8 +1043,34 @@ data DB a = DB
 data DBParams = DBParams
     { dbtime :: TimeStamp
     , dbRNG :: MVar RNG
+    , dbfinalizer :: IORef (Maybe LMDB_Error -> IO ())
     }
 
+
+tryOpenDB :: TVar (Pending MDB_dbi) -> Maybe MapName -> [MDB_DbFlag] -> DBParams -> MDB_txn -> IO MDB_dbi
+tryOpenDB var dbname flags params txn = do
+    getdatum <- STM.atomically $ do
+        progress <- readTVar var
+        case progress of
+            NotStarted -> do
+                writeTVar var Pending
+                return $ do
+                    chain <- readIORef (dbfinalizer params)
+                    writeIORef (dbfinalizer params)
+                               (\r -> do
+                                    chain r
+                                    STM.atomically $ writeTVar var NotStarted)
+                    dbi <- mdb_dbi_open txn dbname flags
+                    writeIORef (dbfinalizer params)
+                               (\r -> do
+                                    chain r
+                                    maybe (STM.atomically $ writeTVar var (Completed dbi))
+                                          (const $ STM.atomically $ writeTVar var NotStarted)
+                                          r)
+                    return dbi
+            Pending -> STM.retry
+            Completed datum -> return $ return datum
+    getdatum
 
 dbRequiresWrite :: DB a -> Bool
 dbRequiresWrite a = dbFlags a .&. 1 /= 0
@@ -1529,12 +1555,12 @@ initMulti (Multi dbname dbivar) = DB 1 $ \_ txn -> do
 -- actually be hashed for efficency of lookups and to work-around LMDB's
 -- hard-coded maximum length.
 initSingle :: forall f k v. FlavorKind f => Single f k v -> DB ()
-initSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
+initSingle (Single dbname dbivar) = DB 1 $ \params txn -> do
     let flags = case flavor (Proxy :: Proxy f) of
                     BoundedKey      -> [MDB_CREATE]
                     BoundedKeyValue -> [MDB_CREATE]
                     HashedKey       -> [MDB_CREATE]
-    _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
+    _ <- tryOpenDB dbivar (Just dbname) flags params txn
     return $ Right ()
 
 -- | Fail the transaction if the given table does not exist.  It is assumed the
@@ -1646,8 +1672,10 @@ tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
         stamp <- if (dbRequiresStamp db_action)
                     then currentTime
                     else return $ error "BUG: unknown transaction time!"
+        fin <- newIORef (const $ return ())
         ei <- handle (return . Left)
-                     (dbOperation db_action (DBParams stamp gv) txn)
+                     (dbOperation db_action (DBParams stamp gv fin) txn)
+        readIORef fin >>= ($ either Just (const Nothing) ei)
         result <- either (return . onError) (fmap onSuccess . copyByteStrings) ei
         either (const $ mdb_txn_abort) (const $ mdb_txn_commit) ei txn
         return result
