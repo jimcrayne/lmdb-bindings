@@ -1675,9 +1675,9 @@ tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
         fin <- newIORef (const $ return ())
         ei <- handle (return . Left)
                      (dbOperation db_action (DBParams stamp gv fin) txn)
-        readIORef fin >>= ($ either Just (const Nothing) ei)
         result <- either (return . onError) (fmap onSuccess . copyByteStrings) ei
         either (const $ mdb_txn_abort) (const $ mdb_txn_commit) ei txn
+        readIORef fin >>= ($ either Just (const Nothing) ei)
         return result
 
     copyByteStrings :: ( NFData v
