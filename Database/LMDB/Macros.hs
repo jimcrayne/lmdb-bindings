@@ -63,6 +63,7 @@ import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.STM.TVar
 import Data.Typeable
 import Debug.Trace
+import Control.Exception
 
 -- | Kind for selecting LMDB-based lookup-table implementation.
 --
@@ -80,6 +81,10 @@ data Proxy (f :: DBFlavor) = Proxy
 
 type MapName = String
 type KeyName = S.ByteString
+
+
+catchAny :: IO a -> (SomeException -> IO a) -> IO a
+catchAny = Control.Exception.catch
 
 -- | This type is used to represent the state of a resource that must be
 -- initialized on first-use but which might be used in multiple threads and
@@ -101,9 +106,12 @@ performAtomicIO var action = do
             NotStarted -> do
                 writeTVar var Pending
                 return $ do
-                    datum <- action
-                    STM.atomically $ writeTVar var (Completed datum)
-                    return datum
+                    catchAny 
+                          (do datum <- action
+                              STM.atomically $ writeTVar var (Completed datum)
+                              return datum)
+                          (\e -> do STM.atomically $ writeTVar var NotStarted
+                                    throw e)
             Pending -> STM.retry
             Completed datum -> return $ return datum
     getdatum
