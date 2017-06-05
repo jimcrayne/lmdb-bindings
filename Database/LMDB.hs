@@ -30,7 +30,7 @@ module Database.LMDB
     , closeDBEnv
     , runDB
     , tryDB
-    , unsafeToDBS
+    , unsafeGetDBS
 
     -- ** Specifying a Transaction
     , DB
@@ -1577,7 +1577,8 @@ data DBEnv = DBEnv DBS (MVar RNG)
 
 -- | Use this to ignore database layout and insert and lookup
 --   arbitrary byte strings with 'insertKey\'' and 'lookupVal\''
-unsafeToDBS (DBEnv dbs _) = dbs
+unsafeGetDBS :: DBEnv -> IO DBS
+unsafeGetDBS (DBEnv dbs _) = return dbs
 
 -- | Open a database.  The current design is limited in that data represented
 -- by 'DBRef', 'Single', and 'Multi' are assumed to be associated with only a
