@@ -317,6 +317,12 @@ data MDB_txn = MDB_txn
     , _txn_p   :: !(Maybe MDB_txn) -- parent transaction, if any
     }
 
+instance Eq MDB_txn where
+    MDB_txn { _txn_ptr = a } == MDB_txn { _txn_ptr = b }
+        = a == b
+    MDB_txn { _txn_ptr = a } /= MDB_txn { _txn_ptr = b }
+        = a /= b
+
 -- | Identifier for a transaction.
 newtype MDB_txnid = MDB_txnid { _txnid :: MDB_txnid_t } deriving (Ord, Eq, Show)
 

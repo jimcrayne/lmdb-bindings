@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+import Control.Concurrent
 import Database.LMDB
 import System.Directory ( createDirectoryIfMissing )
 
@@ -26,13 +27,19 @@ main = do
     createDirectoryIfMissing True dbpath
     env <- openDBEnv dbpath (Just noisefile)
     putStrLn $ "opened "++ dbpath
-    e <- runDB env $ do
-            dbtrace "started transaction"
-            initSingle singleB
-            dbtrace "finished initSingle"
-            initMulti multiC
-            writeDBRef refA True
-            store singleB 5 "foo"
-            insert multiC 6 "bar"
+    forkIO $ do
+        e <- runDB env $ do
+                dbtrace "started transaction"
+                initSingle singleB
+                dbtrace "finished initSingle"
+                initMulti multiC
+                writeDBRef refA True
+                store singleB 5 "foo"
+                insert multiC 6 "bar"
+                dblift $ threadDelay 1000000 -- delay transaction commit for 1 second
+        print ("ready to use dbi", e)
+
+    threadDelay 250000 -- 1/4 second
+    e <- runDB env (dbtrace "started next" *> fetch singleB 5)
     print e
     closeDBEnv env
