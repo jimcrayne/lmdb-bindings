@@ -1128,9 +1128,8 @@ orElse a b = DB (dbFlags a .|. dbFlags b) $ \stamp txn -> do
                 else return $ Right txn
     either (return . Left) (withTxn stamp txn) txn'
  where
-    -- TODO: Do we need to handle LMDB_Error exceptions here?
     withTxn stamp txn txn' = do
-        ea <- dbOperation a stamp txn'
+        ea <- handle (return . Left) $ dbOperation a stamp txn'
         if dbRequiresWrite a
             then case ea of
                     Left _ -> do mdb_txn_abort txn'
