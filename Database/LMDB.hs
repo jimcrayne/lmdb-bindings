@@ -30,6 +30,7 @@ module Database.LMDB
     , closeDBEnv
     , runDB
     , tryDB
+    , unsafeToDBS
 
     -- ** Specifying a Transaction
     , DB
@@ -1573,6 +1574,8 @@ mdbTry action = handle (return . Left)
 
 -- | An opague type representing an open database.
 data DBEnv = DBEnv DBS (MVar RNG)
+
+unsafeToDBS (DBEnv dbs _) = dbs
 
 -- | Open a database.  The current design is limited in that data represented
 -- by 'DBRef', 'Single', and 'Multi' are assumed to be associated with only a
