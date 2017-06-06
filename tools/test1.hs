@@ -13,6 +13,8 @@ database [d|
 
     multiC = xxx :: Multi 'BoundedKey Int String
 
+    fam = xxx :: String -> Single 'BoundedKey Int Int
+
     |]
 
 

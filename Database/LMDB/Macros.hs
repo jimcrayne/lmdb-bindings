@@ -265,10 +265,13 @@ database qsigs = do
             Just typ' ->
                 case isTable typ' of
                     Nothing -> passThrough
-                    Just tblcon ->
+                    Just tblcon -> do
+                        reftyp <- [t| IORef (Map String $(return typ')) |]
                         -- Here we handle the case: xxx :: String -> Multi fl key val
-                        (++) <$> declareName typ [| newIORef Map.empty |] tblname
-                             <*> ( fmap (:[])
+                        (++) <$> declareName reftyp
+                                             [| newIORef Map.empty |]
+                                             tblname
+                             <*> ( fmap (([SigD name' typ]++) . (:[]))
                                     $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
 
      where
