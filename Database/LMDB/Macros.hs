@@ -270,8 +270,8 @@ database qsigs = do
                     case Map.lookup $(varE vname) m of
                         Just tbl -> return tbl
                         Nothing  -> do
-                            tbl <- $multi ( $(liftString $ nameBase name') ++"_"++str) <$> newTVarIO NotStarted
-                            writeIORef $(varE tblname) (Map.insert str tbl m)
+                            tbl <- $multi ( $(liftString $ nameBase name') ++ "_" ++ $(varE vname)) <$> newTVarIO NotStarted
+                            writeIORef $(varE tblname) (Map.insert $(varE vname) tbl m)
                             return tbl
                  |]
 
