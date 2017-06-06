@@ -43,6 +43,7 @@ library
                 , monad-loops
                 --, global-variables
                 , hashtables
+                , containers
                 --, extra
                 , deepseq
                 , directory

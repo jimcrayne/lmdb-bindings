@@ -13,6 +13,8 @@
 -- >
 -- >    freshness = xxx :: Single 'HashedKey RawCertificate Int64
 -- >
+-- >    tables = xxx :: String -> Multi 'BoundedKeyValue Int64 SHA1
+-- >
 -- >  |]
 --
 -- Here, three top-level variables are declared, one ref and two maps.
@@ -35,6 +37,7 @@
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE KindSignatures      #-}
 {-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE QuasiQuotes         #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Database.LMDB.Macros
     ( database
@@ -53,8 +56,13 @@ module Database.LMDB.Macros
     ) where
 
 import Data.Maybe
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import Data.IORef
+import System.IO.Unsafe
 import Database.LMDB.Raw.Types
 import Language.Haskell.TH
+import Language.Haskell.TH.Syntax (liftString)
 import Control.Applicative
 import qualified Data.ByteString.Char8 as Char8
 import Data.Global.Internal
@@ -64,6 +72,25 @@ import Control.Concurrent.STM.TVar
 import Data.Typeable
 import Debug.Trace
 import Control.Exception
+
+
+#if 0
+-- tables = xxx :: String -> Multi 'BoundedKeyValue Int Int
+-- Should become...
+{-# NOINLINE __tables_map #-}
+__tables_map :: IORef (Map String (Multi 'BoundedKeyValue Int Int))
+__tables_map = unsafePerformIO $ newIORef Map.empty
+
+tables :: String -> Multi 'BoundedKeyValue Int Int
+tables str = unsafePerformIO $ do
+    m <- readIORef __tables_map
+    case Map.lookup str m of
+        Just tbl -> return tbl
+        Nothing  -> do
+            tbl <- Multi ("tables_"++str) <$> newTVarIO NotStarted
+            writeIORef __tables_map (Map.insert str tbl m)
+            return tbl
+#endif
 
 -- | Kind for selecting LMDB-based lookup-table implementation.
 --
@@ -210,16 +237,55 @@ database qsigs = do
     concat <$> sequence (map gen sigs) -- :: Q [Dec]
  where
 
-    gen (SigD name typ) = maybe (return [SigD name' typ]) (flip (declareName typ) name') mkref
+    genArr name' typ =
+        case arrowType typ of
+            Nothing   -> return passThrough
+            Just typ' ->
+                case isTable typ' of
+                    Nothing -> return passThrough
+                    Just tblcon ->
+                        -- Here we handle the case: xxx :: String -> Multi fl key val
+                        (++) <$> declareName typ [| newIORef Map.empty |] tblname
+                             <*> ( fmap (:[])
+                                    $ funD name' [clause [varP (mkName "str")] (normalB $ fbody tblcon) []] )
+
      where
-        isMulti (AppT c _) = isMulti c
-        isMulti t = t == ConT ''Multi
+        passThrough = [SigD name' typ] -- Unrecognized declarations are passed unaltered.
 
-        isSingle (AppT c _) = isSingle c
-        isSingle t = t == ConT ''Single
+        tblname = mkName $ "__" ++ nameBase name' ++ "_map"
 
-        isDBRef (AppT c _) = isDBRef c
-        isDBRef t = t == ConT ''DBRef
+        arrowType (AppT (AppT ArrowT (ConT str)) typ) | str==''String  =  Just typ
+        arrowType _                                                    =  Nothing
+
+        isTable (AppT c _) = isTable c
+        isTable t | t==ConT ''Multi = Just (conE 'Multi)
+        isTable t | t==ConT ''Single = Just (conE 'Single)
+        isTable _ = Nothing
+
+        fbody multi =
+                 [| unsafePerformIO $ do
+                    m <- readIORef $(varE tblname)
+                    case Map.lookup str m of
+                        Just tbl -> return tbl
+                        Nothing  -> do
+                            tbl <- $multi ( $(liftString $ nameBase name') ++"_"++str) <$> newTVarIO NotStarted
+                            writeIORef $(varE tblname) (Map.insert str tbl m)
+                            return tbl
+                 |]
+
+
+    gen (SigD name typ) = maybe (genArr name' typ)
+                                (flip (declareName typ) name')
+                                mkref
+     where
+        -- isMulti (AppT c _)  =  isMulti c
+        isMulti t           =  t == ConT ''Multi
+
+        -- isSingle (AppT c _)  =  isSingle c
+        isSingle t           =  t == ConT ''Single
+
+        -- isDBRef (AppT c _)  =  isDBRef c
+        isDBRef t           =  t == ConT ''DBRef
 
         mapname = nameBase name
 
