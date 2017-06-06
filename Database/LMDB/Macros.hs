@@ -237,12 +237,34 @@ database qsigs = do
     concat <$> sequence (map gen sigs) -- :: Q [Dec]
  where
 
-    genArr name' typ =
+    genPlain name' typ = maybe (return [SigD name' typ])
+                               (flip (declareName typ) name')
+                               mkref
+     where
+        isMulti (AppT c _)  =  isMulti c
+        isMulti t           =  t == ConT ''Multi
+
+        isSingle (AppT c _)  =  isSingle c
+        isSingle t           =  t == ConT ''Single
+
+        isDBRef (AppT c _)  =  isDBRef c
+        isDBRef t           =  t == ConT ''DBRef
+
+        mapname = nameBase name'
+
+        mkref =
+            case typ of
+                _ | isMulti  typ -> Just [| Multi  mapname <$> newTVarIO NotStarted |]
+                _ | isSingle typ -> Just [| Single mapname <$> newTVarIO NotStarted |]
+                _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) <$> newTVarIO NotStarted |]
+                _                -> Nothing
+
+    gen (SigD name typ) =
         case arrowType typ of
-            Nothing   -> return passThrough
+            Nothing   -> passThrough
             Just typ' ->
                 case isTable typ' of
-                    Nothing -> return passThrough
+                    Nothing -> passThrough
                     Just tblcon ->
                         -- Here we handle the case: xxx :: String -> Multi fl key val
                         (++) <$> declareName typ [| newIORef Map.empty |] tblname
@@ -250,7 +272,7 @@ database qsigs = do
                                     $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
 
      where
-        passThrough = [SigD name' typ] -- Unrecognized declarations are passed unaltered.
+        passThrough = genPlain name' typ
 
         tblname = mkName $ "__" ++ nameBase name' ++ "_map"
 
@@ -261,6 +283,8 @@ database qsigs = do
         isTable t | t==ConT ''Multi = Just (conE 'Multi)
         isTable t | t==ConT ''Single = Just (conE 'Single)
         isTable _ = Nothing
+
+        name' = mkName $ nameBase name
 
         vname = mkName "str"
 
@@ -274,31 +298,6 @@ database qsigs = do
                             writeIORef $(varE tblname) (Map.insert $(varE vname) tbl m)
                             return tbl
                  |]
-
-
-    gen (SigD name typ) = maybe (genArr name' typ)
-                                (flip (declareName typ) name')
-                                mkref
-     where
-        -- isMulti (AppT c _)  =  isMulti c
-        isMulti t           =  t == ConT ''Multi
-
-        -- isSingle (AppT c _)  =  isSingle c
-        isSingle t           =  t == ConT ''Single
-
-        -- isDBRef (AppT c _)  =  isDBRef c
-        isDBRef t           =  t == ConT ''DBRef
-
-        mapname = nameBase name
-
-        name' = mkName mapname
-
-        mkref =
-            case typ of
-                _ | isMulti  typ -> Just [| Multi  mapname <$> newTVarIO NotStarted |]
-                _ | isSingle typ -> Just [| Single mapname <$> newTVarIO NotStarted |]
-                _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) <$> newTVarIO NotStarted |]
-                _                -> Nothing
 
     -- alternate: ValD (VarP version2_1627446612)
     --                 (NormalB (SigE (ConE GHC.Tuple.())
