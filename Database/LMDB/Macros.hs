@@ -247,7 +247,7 @@ database qsigs = do
                         -- Here we handle the case: xxx :: String -> Multi fl key val
                         (++) <$> declareName typ [| newIORef Map.empty |] tblname
                              <*> ( fmap (:[])
-                                    $ funD name' [clause [varP (mkName "str")] (normalB $ fbody tblcon) []] )
+                                    $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
 
      where
         passThrough = [SigD name' typ] -- Unrecognized declarations are passed unaltered.
@@ -262,10 +262,12 @@ database qsigs = do
         isTable t | t==ConT ''Single = Just (conE 'Single)
         isTable _ = Nothing
 
+        vname = mkName "str"
+
         fbody multi =
                  [| unsafePerformIO $ do
                     m <- readIORef $(varE tblname)
-                    case Map.lookup str m of
+                    case Map.lookup $(varE vname) m of
                         Just tbl -> return tbl
                         Nothing  -> do
                             tbl <- $multi ( $(liftString $ nameBase name') ++"_"++str) <$> newTVarIO NotStarted
