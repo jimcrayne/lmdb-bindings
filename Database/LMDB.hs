@@ -139,7 +139,7 @@ module Database.LMDB
     , createAppendDB
     , openDB
     , openAppendDB
-    , createDupsortDB
+    , createDupSortDB
     , createAppendDupDB
     , openDupSortDB
     , openAppendDupDB
@@ -191,6 +191,7 @@ module Database.LMDB
     -- | This is originally from the global-variables package, but it's not maintained.
     --   Open LMDB Enironments are in a hashtable stored in "LMDB Environments" MVar.
     , declareMVar
+    , HashTable
     ) where
 
 import System.FilePath
@@ -559,7 +560,7 @@ shutDownDBS (DBS env dir emvar)= do
 
 -- | Like 'openDB', but specify LMDB flags.
 --  This function is considered internal because it exposes the MDB_DbFlag type.
---  Consider using 'openDupSortDB' or 'createDupsortDB' ...
+--  Consider using 'openDupSortDB' or 'createDupSortDB' ...
 internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
 internalOpenDB flags (DBS env dir eMvar) name = do 
     e <- readMVar eMvar
@@ -599,13 +600,13 @@ createDB = internalOpenDB [MDB_CREATE]
 createAppendDB ::  DBS -> ByteString -> IO DBHandle
 createAppendDB dbs name = openAppendDBFlags [MDB_CREATE] dbs name
 
--- | createDupsortDB db name
+-- | createDupSortDB db name
 -- Like 'createDB' but the database is flagged DUPSORT
-createDupsortDB ::  DBS -> ByteString -> IO DBHandle
-createDupsortDB = internalOpenDB [MDB_CREATE, MDB_DUPSORT]
+createDupSortDB ::  DBS -> ByteString -> IO DBHandle
+createDupSortDB = internalOpenDB [MDB_CREATE, MDB_DUPSORT]
 
 -- | createAppendDupDB db name
--- Like 'createDupsortDB' but the data comparison function is set to always return 1
+-- Like 'createDupSortDB' but the data comparison function is set to always return 1
 createAppendDupDB ::  DBS -> ByteString -> IO DBHandle
 createAppendDupDB dbs name = openAppendDBFlags [MDB_CREATE,MDB_DUPSORT] dbs name
 
