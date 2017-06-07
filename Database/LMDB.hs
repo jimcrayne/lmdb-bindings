@@ -157,6 +157,7 @@ module Database.LMDB
     -- |   These functions may result in dangling pointers if not used with care.
     --
     , unsafeFetch
+    , unsafeFetchW
     , unsafeDumpToList
     , unsafeDumpToListOp
 
@@ -712,8 +713,16 @@ internalGetDBFlags (DBH (env,eMvar) dbi writeflags mvar) = do
 --      3) the provided finalizer was called
 --
 unsafeFetch :: DBHandle -> ByteString -> IO (Maybe (ByteString, IO()) )
-unsafeFetch (DBH (env,eMvar) dbi _ mvar) key = do
-    txn <- mdb_txn_begin env Nothing False
+unsafeFetch = unsafeFetchInternal True
+
+-- | like 'unsafeFetch' but you might poke into the byte strings? anyway
+--   this opens a write transaction, so locks writers until the strings
+--   are finalized.
+unsafeFetchW = unsafeFetchInternal False
+
+unsafeFetchInternal :: Bool -> DBHandle -> ByteString -> IO (Maybe (ByteString, IO()) )
+unsafeFetchInternal isReadOnly = \(DBH (env,eMvar) dbi _ mvar) key = do
+    txn <- mdb_txn_begin env Nothing isReadOnly
     let (fornptr,offs,len) = toForeignPtr key
     mabVal <- withForeignPtr fornptr $ \ptr -> 
                 mdb_get txn dbi $ MDB_val (fromIntegral len) (ptr `plusPtr` offs)
@@ -1818,4 +1827,3 @@ getRange txn dbi start = do
                 -- pointer's finalizer.
                 finalizeForeignPtr ptr
                 return []
-
