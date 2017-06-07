@@ -38,6 +38,7 @@ module Database.LMDB
     , cases
     , abort
     , dbtrace
+    , dbtrac
     , dblift
     , transactionTime
     , withRNG
@@ -1732,6 +1733,10 @@ withRNG f = DB 4 $ \DBParams { dbRNG=rngv } _ -> do
 -- | Output a debug message.
 dbtrace :: String -> DB ()
 dbtrace str = DB 0 $ \_ _ -> putStrLn str >> return (Right ())
+
+-- | Output a debug message, without new line.
+dbtrac :: String -> DB ()
+dbtrac str = DB 0 $ \_ _ -> putStr str >> return (Right ())
 
 -- | Perform an IO action from within a transaction.  Note that this is unsafe
 -- and very bad practice. It is provided mainly for temporary hacks and
