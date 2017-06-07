@@ -141,7 +141,7 @@ module Database.LMDB
     , openAppendDB
     , createDupsortDB
     , createAppendDupDB
-    , openDupsortDB
+    , openDupSortDB
     , openAppendDupDB
     , unnamedDB
     , closeDB
@@ -559,7 +559,7 @@ shutDownDBS (DBS env dir emvar)= do
 
 -- | Like 'openDB', but specify LMDB flags.
 --  This function is considered internal because it exposes the MDB_DbFlag type.
---  Consider using 'openDupsortDB' or 'createDupsortDB' ...
+--  Consider using 'openDupSortDB' or 'createDupsortDB' ...
 internalOpenDB :: [MDB_DbFlag] -> DBS -> ByteString -> IO DBHandle
 internalOpenDB flags (DBS env dir eMvar) name = do 
     e <- readMVar eMvar
@@ -624,13 +624,13 @@ openDB = internalOpenDB []
 openAppendDB ::  DBS -> ByteString -> IO DBHandle
 openAppendDB dbs name = openAppendDBFlags [] dbs name
 
--- | openDupsortDB db name
+-- | openDupSortDB db name
 -- Like 'openDB' but DUPSORT specified.
-openDupsortDB ::  DBS -> ByteString -> IO DBHandle
-openDupsortDB = internalOpenDB [MDB_DUPSORT]
+openDupSortDB ::  DBS -> ByteString -> IO DBHandle
+openDupSortDB = internalOpenDB [MDB_DUPSORT]
 
 -- | openAppendDupDB db name
--- Like 'openDupsortDB' but the data comparison function is set to always return 1
+-- Like 'openDupSortDB' but the data comparison function is set to always return 1
 openAppendDupDB ::  DBS -> ByteString -> IO DBHandle
 openAppendDupDB dbs name = openAppendDBFlags [MDB_DUPSORT] dbs name
 
