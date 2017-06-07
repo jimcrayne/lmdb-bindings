@@ -187,7 +187,10 @@ module Database.LMDB
     , keysOf
     , valsOf
     , copyTable
-
+    -- * Global MVars
+    -- | This is originally from the global-variables package, but it's not maintained.
+    --   Open LMDB Enironments are in a hashtable stored in "LMDB Environments" MVar.
+    , declareMVar
     ) where
 
 import System.FilePath
@@ -408,7 +411,7 @@ isOpenEnv' :: S.ByteString -> IO Bool
 isOpenEnv' dir = do
     h <- H.new :: IO (HashTable S.ByteString DBS)
     let registryMVar = declareMVar "LMDB Environments" h
-    registry <- readMVar registryMVar 
+    registry <- readMVar registryMVar
     result <- H.lookup registry dir
     case result of
         Nothing -> return False
@@ -528,11 +531,8 @@ initDBSOptions dir mbMaxReader mbMaxDb options = do
 
 -- | openDBS - shouldn't really need this
 --
---  NOT RECOMMENDED. This is a no op in the 
---  case the environment is open, otherwise
---  it calls 'initDBS'. Normally use 'withDBS'
---  or 'initDBS' and don't shut down until program
---  terminates.
+--  This is a no op in the case the environment is open, otherwise
+--  it calls 'initDBS'.
 openDBS :: DBS -> IO DBS
 openDBS x@(DBS env dir isopenmvar) = do
     isopen <- readMVar isopenmvar
