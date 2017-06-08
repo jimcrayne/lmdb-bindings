@@ -708,7 +708,7 @@ internalGetDBFlags (DBH (env,eMvar) dbi writeflags mvar) = do
 -- invalid when the transaction is committed. Be sure it is not accessed
 -- in any of the following 3 scenarios:
 --
---      1) the environment is closed  (after call to 'shutDownDBS')
+--      1) the environment is closed  (after call to 'shutDownDBS', 'closeDBEnv')
 --      2) the database is closed (after call to 'closeDB')
 --      3) the provided finalizer was called
 --
