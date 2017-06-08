@@ -114,3 +114,14 @@ Executable test1
   hs-source-dirs: tools
   main-is:        test1.hs
 
+Executable newtbl
+  Default-Language: Haskell2010
+  build-depends:  lmdb-bindings
+                , base
+                , bytestring
+                , deepseq
+                , process
+                , binary
+  hs-source-dirs: tools
+  main-is:        newtbl.hs
+

@@ -108,6 +108,7 @@ module Database.LMDB
     -- ** Public interface.
     -- *** Environments
     , DBS
+    -- , dbsEnv
     , withDBSDo
     , withManyDBSDo
     , withDBSCreateIfMissing
@@ -123,12 +124,13 @@ module Database.LMDB
     --
     -- | These functions are similar to the operations facilitated by
     --   the @lmdbtool@ utility. The unticked variants which open and
-    --   close the environment are provided for when you only want to
-    --   do one operation. (See '<#HLAF Higher Level Atomic Functions>'). (anchor #HLF#)
+    --   close the environment are provided for when you don't want to
+    --   keep it open. (See '<#HLAF Self-contained functions>'). (anchor #HLF#)
     , listTables'
     , deleteTable'
     , createTable'
     , clearTable'
+    , newTable'
     , insertKey'
     , deleteKey'
     , lookupVal'
@@ -136,8 +138,10 @@ module Database.LMDB
     , keysOf'
     , valsOf'
     -- *** Tables
+    , DBHandle
     , createDB
     , createAppendDB
+    , newTbl
     , openDB
     , openAppendDB
     , createDupSortDB
@@ -169,7 +173,7 @@ module Database.LMDB
     , internalGetDBFlags
     , internalOpenDB
     , openAppendDBFlags
-    -- * High Level Atomic functions
+    -- * Self-contained functions
     --
     -- | These functions use file paths and names as parameters.
     --   They do all the work of opening and closing the environment.
@@ -182,6 +186,7 @@ module Database.LMDB
     , deleteTable
     , createTable
     , clearTable
+    , newTable
     , insertKey
     , deleteKey
     , lookupVal
@@ -192,6 +197,8 @@ module Database.LMDB
     -- * Global MVars
     -- | This is originally from the global-variables package, but it's not maintained.
     --   Open LMDB Enironments are in a hashtable stored in "LMDB Environments" MVar.
+    --   They're only exported for my experimenting convenience.
+    --   Consider these internal and highly subject to change or move to separate module.
     , declareMVar
     , HashTable
     ) where
@@ -344,7 +351,7 @@ deriving instance Class.HashTable (HTable)
 -- whether it is actually MySQL or LDMB or whatever. In the language of LMDB,
 -- this is called an "environment", and this type can be thought of as a handle
 -- to your "LMDB Database Environment".
-data DBS = DBS { dbEnv :: MDB_env
+data DBS = DBS { dbsEnv :: MDB_env
                , dbDir :: FilePath
                , dbsIsOpen :: MVar Bool
                } deriving Typeable
@@ -482,7 +489,7 @@ initDBSOptions dir mbMaxReader mbMaxDb options = do
                       else do
                         (env',_) <- newEnv dir (Just mvar)
                         putMVar registryMVar registry -- unlock registry
-                        return (dbs {dbEnv = env' })
+                        return (dbs {dbsEnv = env' })
         Nothing -> do
             (env',mvar') <- newEnv dir Nothing
             let retv = DBS env' dir mvar'
@@ -712,16 +719,26 @@ internalGetDBFlags (DBH (env,eMvar) dbi writeflags mvar) = do
 --      2) the database is closed (after call to 'closeDB')
 --      3) the provided finalizer was called
 --
+--
+-- If you use this within a bracket or bracket-implicit function such as
+-- withDBSDo or runDB then be sure to ensure all strings escaping the bracket
+-- are copies created with 'Data.ByteString.copy'. LMDB was actually designed
+-- with the use case in mind that environments and a few tables from each are
+-- left open indefinitely or until just before the process terminates. So long
+-- as there are not too many tables, there is little penalty.
+--
 unsafeFetch :: DBHandle -> ByteString -> IO (Maybe (ByteString, IO()) )
 unsafeFetch = unsafeFetchInternal True
 
 -- | like 'unsafeFetch' but you might poke into the byte strings? anyway
 --   this opens a write transaction, so locks writers until the strings
---   are finalized.
+--   are finalized. If you do want to write directly into the bytestring,
+--   be sure the database is opened with MDB_WRITEMAP flag. Since LMDB
+--   is copy on write, it should still be transactional.
 unsafeFetchW = unsafeFetchInternal False
 
 unsafeFetchInternal :: Bool -> DBHandle -> ByteString -> IO (Maybe (ByteString, IO()) )
-unsafeFetchInternal isReadOnly = \(DBH (env,eMvar) dbi _ mvar) key = do
+unsafeFetchInternal isReadOnly = \(DBH (env,eMvar) dbi _ mvar) key -> do
     txn <- mdb_txn_begin env Nothing isReadOnly
     let (fornptr,offs,len) = toForeignPtr key
     mabVal <- withForeignPtr fornptr $ \ptr -> 
@@ -735,8 +752,22 @@ unsafeFetchInternal isReadOnly = \(DBH (env,eMvar) dbi _ mvar) key = do
             let commitTransaction = do dputStrLn ("Finalizing (fetch " ++ S.unpack key ++")")
                                        oEnv <- readMVar eMvar
                                        when oEnv $ do
-                                           oDB <- readMVar mvar
+
+           -- Potential optimizing, I use takeMVar/putMVar to avoid a race condition
+           -- which may result committing a transaction on a dropped table... However,
+           -- I'm not sure there is actually any harm if we just let that go. We could
+           -- use _mdb_txn_commit
+           -- directly instead of the wrapper, and ignore the error if it occurs.
+           -- Note also* Empirically, i've never actualy seen this race condition happen,
+           -- and it may be impossible for some reason i do not understand.
+           --
+                                           oDB <- takeMVar mvar -- readMVAr mvar
+                                           -- closing a db aborts transactions, and that
+                                           -- implies they are closed already,
+                                           -- so only commit if our flag says "Open"
                                            when oDB $ mdb_txn_commit txn
+                                           putMVar mvar oDB
+
             addForeignPtrFinalizer fptr commitTransaction 
             return . Just $ (fromForeignPtr fptr 0  (fromIntegral size), finalizeForeignPtr fptr)
 
@@ -1827,3 +1858,73 @@ getRange txn dbi start = do
                 -- pointer's finalizer.
                 finalizeForeignPtr ptr
                 return []
+
+-- | like 'newTbl' but use default flags
+newTable' dbs k = newTbl dbs k []
+
+-- | like 'newTbl' but use default flags and opens and closes the environment
+--   named by the first parameter. The other parameter is both the prefix to the
+--   table name and the key in the "_counter32" table. _counter32 will also be
+--   created if it does not already exist.
+
+newTable x k = withDBSDo x $ \dbs -> (S.copy . snd <$> newTbl dbs k [])
+
+-- | Create a new table with a name prefixed by the given string and open it
+--   with the given flags. This function also creates and uses a table called
+--   "_counter32" which holds the 32 bit counter that is incremented each time
+--   you call this with the same prefix string. The incremented counter is
+--   appended to the prefix provided to give the actual name of the new table.
+--
+--   Returns: A pair, the first element is a handle to the table, the second is
+--   the table name.
+--
+--   LMDB keeps a slot vector which has to be copied on write transactions, and
+--   is scanned linearly on table opens. The maximum number of open tables is
+--   the size of that slot vector. Defaults are 10 if you used initDBS to make
+--   the environmet and 12 if you used openDBEnv. The size of this vector
+--   determines how many tables you can have open at a time. So be sure to call
+--   closeDB as soon as you can. If you do not, then both the @_counter32@
+--   table and the freshly created table are left open by this function, thus
+--   filling 2 more slots on first call, and 1 more for each later call.
+
+newTbl :: DBS -> ByteString -> [MDB_DbFlag] -> IO (DBHandle,ByteString)
+newTbl dbs counterkey flags =
+  bracket
+    (mdb_txn_begin (dbsEnv dbs) Nothing False)
+    (mdb_txn_commit) $ \txn -> do
+        let (fptr,offs,len) = toForeignPtr counterkey
+        ctrTbl <- mdb_dbi_open txn (Just "_counter32") [MDB_CREATE]--,MDB_WRITEMAP]
+        tblname <- withForeignPtr fptr $ \ ptr -> do
+          let key = MDB_val (fromIntegral len) (ptr `plusPtr` offs)
+          mbVal <- mdb_get txn ctrTbl key
+          case mbVal of
+            Nothing -> do -- no counter, so create it as 0
+                let writeflags = compileWriteFlags []
+                with (0::Word32) $ \zero' ->
+                    -- reserve 4 bytes for a Word32
+                    mdb_reserve writeflags txn ctrTbl key 4
+                    -- ^ note if MDB_WRITEMAP, then memory is not initialized to 0.
+                    -- let zero = MDB_val 4 (castPtr zero')
+                    --     in mdb_put writeflags txn ctrTbl key zero
+                -- let cntstr = S.pack (show (0::Word32))
+                return counterkey
+            Just (MDB_val size ptr) -> do
+                count'old <- peek (castPtr ptr) :: IO Word32
+                -- WARNING no check that size=4
+                -- poke (castPtr ptr) count -- requires MDB_WRITEMAP
+                with (count'old +1) $ \pcount ->
+                    let count = MDB_val 4 (castPtr pcount)
+                        writeflags = compileWriteFlags []
+                        in mdb_put writeflags txn ctrTbl key count
+                x <- peek (castPtr ptr) :: IO Word32
+                let cntstr = S.pack (show x)
+                return (S.append counterkey cntstr)
+        -- now create the new table
+        retdbi <- mdb_dbi_open txn (Just (unpackUtf8 tblname)) (MDB_CREATE:flags)
+        b <- newMVar True
+        let retdh = DBH { dbhEnv = (dbsEnv dbs, dbsIsOpen dbs)
+                        , dbhDBI = retdbi :: MDB_dbi
+                        , compiledWriteFlags = compileWriteFlags []:: MDB_WriteFlags
+                        , dbhIsOpen = b:: MVar Bool
+                        }
+        return (retdh,tblname)
