@@ -1,5 +1,6 @@
 module Database.LMDB.BinaryUtil where
 
+import Control.Applicative
 import Data.Binary
 import Data.Binary.Get
 import Data.Binary.Put

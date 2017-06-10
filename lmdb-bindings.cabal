@@ -15,7 +15,7 @@ maintainer:          jim.crayne@gmail.com
 category:            Database
 build-type:          Custom
 -- extra-source-files:  
-cabal-version:       >= 1.16.0.3
+cabal-version:       >= 1.18
 
 Flag hourglass
         Description: Use the 'hourglass' package for timestamps.  Disable to use 'time'.
@@ -37,7 +37,7 @@ library
     PackUtf8
   -- other-modules:       
   -- other-extensions:    
-  build-depends:  base >=4.6 && < 5, array
+  build-depends:  base >=4.7 && < 5, array
                 , bytestring
                 , filepath
                 , disk-free-space
