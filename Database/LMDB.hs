@@ -1903,7 +1903,7 @@ newTbl dbs counterkey flags =
                 with (0::Word64) $ \zero' ->
                     -- reserve 4 bytes for a Word32, pad another 4 bytes for future byteswap-adaptations to big endian machines
                     mdb_reserve writeflags txn ctrTbl key 8
-                    -- ^ note if MDB_WRITEMAP, then memory is not initialized to 0.
+                    -- if MDB_WRITEMAP, then memory is not initialized to 0.
                     -- let zero = MDB_val 4 (castPtr zero')
                     --     in mdb_put writeflags txn ctrTbl key zero
                 -- let cntstr = S.pack (show (0::Word32))
