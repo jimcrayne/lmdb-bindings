@@ -1,10 +1,13 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 
 -- import Test.QuickCheck
 import Database.LMDB.Raw
 import Database.LMDB
 import Control.Monad
+import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Concurrent
 import Control.Exception (bracket)
@@ -16,8 +19,16 @@ import System.FilePath
 import Text.Printf
 import Data.IORef
 import qualified  Data.ByteString.Char8 as B
+import qualified  Data.ByteString.Lazy.Char8 as L
+import Data.ByteString (ByteString)
+
+import qualified Crypto.Random as CR
+import Data.Binary
+import Data.Word
+import Data.Bits
 
 import System.Process
+
 
 {-# NOINLINE globalDBS #-}
 globalDBS :: MVar DBS
@@ -60,7 +71,7 @@ withTable1 = bracket (readMVar globalDBS >>= flip openAppendDupDB "table1") clos
 -- runTests = $quickCheckAll
 main = do
     initGlobalEnv 
-    getLine
+    --getLine
     -- void runTests 
     dbs <- readMVar globalDBS
     withTable1 $ \db -> do
@@ -88,7 +99,22 @@ main = do
         mapM_ (print . snd) kvs
         finalize
     shutDownDBS dbs
-    getLine
-    
-    
-        
+    --getLine
+    bER <- newIORef False
+    flip mapM_ [0  .. 1000] $ \_ -> do
+        (x,_) <- CR.randomBytesGenerate 8 <$> makeGen Nothing
+        let  cutoff = fromIntegral (maxBound::Word32) :: Word64
+             y'= decode (L.fromChunks [x]) :: Word64
+             mas = if y' `mod` 2 == 0 then 0xffffffff00000000
+                                      else 0x00000000ffffffff
+             y = y' .&. mas
+             z = if y > cutoff then byteSwap64 y else y
+             in if z > cutoff
+                              then do
+                                      writeIORef bER True
+                                      putStrLn ("FAIL: " ++ show z)
+                              else return ()
+
+    bE <- readIORef bER
+    if bE then putStrLn "Test Failed"
+          else putStrLn "Test Succeeded."

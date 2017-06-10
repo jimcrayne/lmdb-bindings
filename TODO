@@ -1,0 +1,9 @@
+-- Database.LMDB
+1. create newkey command analogous to newtbl
+2. perhaps newtbl should accept an initializer
+	- pros: gaurantee a key or two is there whenever a table is, and
+		that they are the first keys added. useful?
+	- cons: longer blocking write transaction, but could warn user in the haddock
+
+--- lmdbtool
+1. work newtbl into lmdbtool
