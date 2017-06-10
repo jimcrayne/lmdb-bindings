@@ -6,9 +6,9 @@ version:             0.1.2.0
 synopsis:            Various interfaces to LMDB databases, and a command line util.
 -- description:         
 homepage:            https://github.com/JimCrayne/lmdb-bindings
-license:             BSD2
+license:             AGPL-3
 license-file:        LICENSE
-author:              James Crayne, Joseph Crayne, David Barbour
+author:              James Crayne, Joseph Crayne, David Barbour, Keegan McAllister
 maintainer:          jim.crayne@gmail.com
 -- copyright:           
 category:            Database
