@@ -4,6 +4,6 @@
 	- pros: gaurantee a key or two is there whenever a table is, and
 		that they are the first keys added. useful?
 	- cons: longer blocking write transaction, but could warn user in the haddock
-
+3. link with cpu package? and have endianness flag appended to numbers?
 --- lmdbtool
 1. work newtbl into lmdbtool
