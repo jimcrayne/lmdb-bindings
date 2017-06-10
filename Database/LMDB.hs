@@ -1864,14 +1864,14 @@ newTable' dbs k = newTbl dbs k []
 
 -- | like 'newTbl' but use default flags and opens and closes the environment
 --   named by the first parameter. The other parameter is both the prefix to the
---   table name and the key in the "_counter32" table. _counter32 will also be
+--   table name and the key in the "_counters" table. _counters will also be
 --   created if it does not already exist.
 
 newTable x k = withDBSDo x $ \dbs -> (S.copy . snd <$> newTbl dbs k [])
 
 -- | Create a new table with a name prefixed by the given string and open it
 --   with the given flags. This function also creates and uses a table called
---   "_counter32" which holds the 32 bit counter that is incremented each time
+--   "_counters" which holds the 32 bit counter that is incremented each time
 --   you call this with the same prefix string. The incremented counter is
 --   appended to the prefix provided to give the actual name of the new table.
 --
@@ -1883,7 +1883,7 @@ newTable x k = withDBSDo x $ \dbs -> (S.copy . snd <$> newTbl dbs k [])
 --   the size of that slot vector. Defaults are 10 if you used initDBS to make
 --   the environmet and 12 if you used openDBEnv. The size of this vector
 --   determines how many tables you can have open at a time. So be sure to call
---   closeDB as soon as you can. If you do not, then both the @_counter32@
+--   closeDB as soon as you can. If you do not, then both the @_counters@
 --   table and the freshly created table are left open by this function, thus
 --   filling 2 more slots on first call, and 1 more for each later call.
 
@@ -1893,31 +1893,34 @@ newTbl dbs counterkey flags =
     (mdb_txn_begin (dbsEnv dbs) Nothing False)
     (mdb_txn_commit) $ \txn -> do
         let (fptr,offs,len) = toForeignPtr counterkey
-        ctrTbl <- mdb_dbi_open txn (Just "_counter32") [MDB_CREATE]--,MDB_WRITEMAP]
+        ctrTbl <- mdb_dbi_open txn (Just "_counters") [MDB_CREATE]--,MDB_WRITEMAP]
         tblname <- withForeignPtr fptr $ \ ptr -> do
           let key = MDB_val (fromIntegral len) (ptr `plusPtr` offs)
           mbVal <- mdb_get txn ctrTbl key
+          let writeflags = compileWriteFlags []
           case mbVal of
             Nothing -> do -- no counter, so create it as 0
-                let writeflags = compileWriteFlags []
-                with (0::Word32) $ \zero' ->
-                    -- reserve 4 bytes for a Word32
-                    mdb_reserve writeflags txn ctrTbl key 4
+                with (0::Word64) $ \zero' ->
+                    -- reserve 4 bytes for a Word32, pad another 4 bytes for future byteswap-adaptations to big endian machines
+                    mdb_reserve writeflags txn ctrTbl key 8
                     -- ^ note if MDB_WRITEMAP, then memory is not initialized to 0.
                     -- let zero = MDB_val 4 (castPtr zero')
                     --     in mdb_put writeflags txn ctrTbl key zero
                 -- let cntstr = S.pack (show (0::Word32))
                 return counterkey
             Just (MDB_val size ptr) -> do
-                count'old <- peek (castPtr ptr) :: IO Word32
+                count'0ld <- peek (castPtr ptr) :: IO Word64
+                ---- detected endian change, so ByteSwap and continue
+                let count'old = -- maybe its better to just have an endianness flag?
+                     if count'0ld > fromIntegral (maxBound::Word32)
+                         then (byteSwap64 count'0ld)
+                         else count'0ld
+                with (count'old +1) $ \pcount ->
+                    let count = MDB_val 8 (castPtr pcount)
+                        in mdb_put writeflags txn ctrTbl key count
                 -- WARNING no check that size=4
                 -- poke (castPtr ptr) count -- requires MDB_WRITEMAP
-                with (count'old +1) $ \pcount ->
-                    let count = MDB_val 4 (castPtr pcount)
-                        writeflags = compileWriteFlags []
-                        in mdb_put writeflags txn ctrTbl key count
-                x <- peek (castPtr ptr) :: IO Word32
-                let cntstr = S.pack (show x)
+                let cntstr = S.pack (show count'old)
                 return (S.append counterkey cntstr)
         -- now create the new table
         retdbi <- mdb_dbi_open txn (Just (unpackUtf8 tblname)) (MDB_CREATE:flags)
