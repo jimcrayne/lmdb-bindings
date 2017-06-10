@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 import Database.LMDB
 
@@ -15,7 +16,7 @@ import Control.DeepSeq (force)
 import System.Process
 import Database.LMDB.Flags
 import Data.Word
-import Data.List (sortBy)
+import Data.List (sortBy,sort)
 import Data.Ord (comparing)
 import Data.Int
 import Data.Bits
@@ -27,6 +28,7 @@ import Foreign.Marshal.Alloc
 import Foreign.ForeignPtr
 import Control.Exception
 import System.Directory
+import qualified Data.Binary as Binary
 
 aliases = [ ("listTables","list")
           , ("createTable","create")
@@ -48,6 +50,16 @@ formatAssocList width indent as = h width (B.length indent) indent as
                                                                     in h max (tot + l x y ys) str' ys
         b x y xs = B.concat [x," => ",y,if null xs then "\n" else ", "]
         l x y xs = B.length (b x y xs)
+
+formatList width indent as = h width (B.length indent) indent as
+    where
+        h _ _ str [] = str
+        h max tot str (y:ys) = if l y ys + tot > max then let str' = B.concat [str,"\n",indent,b y ys]
+                                                              in h max 0 str' ys
+                                                     else let str' = B.concat [str,b y ys]
+                                                              in h max (tot + l y ys) str' ys
+        b y xs = B.concat [y,if null xs then "\n" else ", "]
+        l y xs = B.length (b y xs)
 
 unaliasArgs args | length args < 2 = return args
 unaliasArgs args@(a:b:args') = do
@@ -92,13 +104,15 @@ usage = let cs =
                 putStrLn ""
                 putStrLn "Infix Commands:" >> mapM_ (B.putStrLn . fmt) cs
                 putStrLn ""
-                putStrLn "Prefix Command:" >> mapM_ (B.putStrLn . fmt) ds
+                putStrLn "Prefix Command{✗}:" >> mapM_ (B.putStrLn . fmt) ds
                 putStrLn ""
                 putStrLn "Notes:  {*} These commands accept ‘@’ as name of Main table (unnamedDB)."
                 putStrLn "            To match library, ‘lookupVal’ is accepted as an alias for ‘lookup’."
                 putStrLn ""
                 putStrLn "        {+} On copy commands, ‘true’ indicates to allow duplicate keys."
                 putStrLn "            To copy a single key, pipe the output of ‘lookup’ into ‘insert’."
+                putStrLn ""
+                putStrLn "        {✗} Any Infix command can also be written prefix."
                 putStrLn ""
                 putStrLn "Aliases:"
                 B.putStrLn (formatAssocList 80 "        " (sortBy (comparing fst) aliases))
@@ -108,17 +122,50 @@ main = do
     args <- map B.pack <$> getArgs
     let u = B.unpack
         v = void
-        putPair (x,y) = B.putStrLn (x <> ": " <> y)
-        putPairI n (x,y) = B.putStrLn (B.replicate n ' ' <> x <> ": " <> y)
+        putPair (x,y) = B.putStrLn (f x <> ": " <> f y)
+        putPairI n (x,y) = B.putStrLn (B.replicate n ' ' <> f x <> ": " <> f y)
+        -- TODO special support for _counters
+        --putPairI' n (x,y) = B.putStrLn (B.replicate n ' ' <> f x <> ": " <> g y)
+        f x = case B.readInteger x of
+                            Just (n,"") -> B.pack $ show x
+                            Nothing -> x
+        -- TODO special support for _counters
+        --g x = case Binary.decode (L.fromChunks [x]) of
+        --                    Just n -> B.pack $ show (n::Word32)
+        --                    Nothing -> x
         putTbl path tbl = do 
             putStrLn "---"
             B.putStr tbl >> putStrLn ":"
+            -- TODO special support for _counters
+            --let putit = if "_counter" `B.isPrefixOf` tbl then putPairI' else putPairI
             mapM_ (putPairI 2) =<< toList (u path) tbl
     args' <- if take 1 args == ["-p"] then drop 1 . (args ++) . (:[]) <$> B.getLine
                                       else return args
     
     args'' <- unaliasArgs args'
-    case args'' of
+    let reserved = ("newKey":"newTbl":"show":"copyTable":as ++ bs) where (as,bs) = unzip aliases
+    let checkpath mbpath action = do
+          case mbpath of
+            Just path -> do
+                bExists <- doesDirectoryExist (u path)
+                when (bExists && path `elem` reserved) $ do
+                    putStrLn "For safety, lmdbtool does not operate on lmdb environments with names that are acceptable lmdbtool commands, or reserved."
+                    putStrLn "The following names are reserved:"
+                    B.putStrLn (formatList 80 "        " (sort reserved))
+                    putStrLn "To rename an environment, simply rename the folder which contains data.mdb.\n"
+                    exitFailure
+                action
+            Nothing -> action
+    let (mbpath,args''') = case args'' of
+                            ["copyTable","true",path] -> (Just path, args'') -- prefix command, leave it alone
+                            ["copyTable","false",path]-> (Just path, args'') -- prefix command, leave it alone
+                            ("copyTable":_)           -> (Nothing,   args'') -- prefix command, leave it alone
+                            (x:path:xs) | x `elem` reserved -> (Just path,path:x:xs) -- infix as prefix, so convert it to expected infix
+                            (path:x:xs) | x `elem` reserved -> (Just path,args'') -- already infix, leave it alone
+                            _ ->  (Nothing,args'') -- usage >> exitFailure
+
+    checkpath mbpath $
+      case args''' of
         [path,"list"]               -> mapM_ B.putStrLn =<< listTables (u path)
         [path,"create",tbl]         -> v $ createTable (u path) tbl
         [path,"drop",tbl]           -> v $ deleteTable (u path) tbl
