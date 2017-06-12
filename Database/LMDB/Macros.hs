@@ -41,6 +41,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Database.LMDB.Macros
     ( database
+    , DBSpec(..)
     , xxx
     , DBRef(..)
     , KeyName
@@ -72,7 +73,8 @@ import Control.Concurrent.STM.TVar
 import Data.Typeable
 import Debug.Trace
 import Control.Exception
-
+import Data.Array
+import Database.LMDB.Raw
 
 #if 0
 -- tables = xxx :: String -> Multi 'BoundedKeyValue Int Int
@@ -173,12 +175,12 @@ tryAtomicIO var action = do
 -- | A persistent mutable reference that refers to a value within an LMDB
 -- database.  Although the constructor is exported, it is preferred that you
 -- use the 'database' macro to instantiate this type.
-data DBRef t = DBRef KeyName (TVar (Pending MDB_dbi))
+data DBRef t = DBRef KeyName (Maybe Int)
 
 -- | A persistent lookup-table implemented as a table within an LMDB database.
 -- Although the constructor is exported, it is preferred that you use the
 -- 'database' macro to instantiate this type.
-data Single (f :: DBFlavor) k v = Single MapName (TVar (Pending MDB_dbi))
+data Single (f :: DBFlavor) k v = Single MapName (Maybe Int)
 
 -- | A persistent lookup-table implemented as a table within an LMDB database.
 -- This is similar to 'Single' except that multiple values may be associated
@@ -188,7 +190,7 @@ data Single (f :: DBFlavor) k v = Single MapName (TVar (Pending MDB_dbi))
 -- The current implementation has no advantage over 'Single' unless the
 -- 'BoundedKeyValue' flavor is used.  In that case, the table will be
 -- implemented as a DUPSORT table in the LMDB database.
-data Multi (f :: DBFlavor) k v  = Multi MapName (TVar (Pending MDB_dbi))
+data Multi (f :: DBFlavor) k v  = Multi MapName (Maybe Int)
 
 
 -- | Use this interface to resolve a type-level 'DBFlavor' into a run-time
@@ -234,83 +236,131 @@ xxx = error "xxx placeholder wasn't replaced by the database macro!"
 database :: Q [Dec] -> Q [Dec]
 database qsigs = do
     sigs <- qsigs
-    concat <$> sequence (map gen sigs) -- :: Q [Dec]
+    foldr gen declareSpec sigs DatabaseMacroState
+        { st_decls = []
+        , st_cnt = 1
+        , st_spec = Nothing
+        }
+
+declareSpec :: DatabaseMacroState -> Q [Dec]
+declareSpec st = do
+    decls <- concat <$> sequence (st_decls st)
+    fromMaybe (return decls) $ do
+        n <- st_spec st
+        return $ do
+            let cnt = st_cnt st
+            spec <- [| DBSpec { dbSlotCount = cnt } |]
+            return $ [ SigD n (ConT ''DBSpec)
+                     , ValD (VarP n) (NormalB spec) []
+                     ] ++ decls
+
+isTable :: Type -> Maybe ExpQ
+isTable (AppT c _) = isTable c
+isTable t | t==ConT ''Multi = Just (conE 'Multi)
+isTable t | t==ConT ''Single = Just (conE 'Single)
+isTable _ = Nothing
+
+
+genPlain :: Name -> Type -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroState -> Q [Dec]
+genPlain name' typ r st =
+    if isSpec typ
+        then r (st { st_spec = Just name' })
+        else r (st { st_decls = decl : st_decls st
+                   , st_cnt = cnt' })
+ where
+    decl = maybe (return [SigD name' typ])
+                 (\body -> do
+                    bdy <- body
+                    return [ SigD name' typ
+                           , ValD (VarP name') (NormalB bdy) []
+                           ])
+                 mkref
+
+    isMulti (AppT c _)  =  isMulti c
+    isMulti t           =  t == ConT ''Multi
+
+    isSingle (AppT c _)  =  isSingle c
+    isSingle t           =  t == ConT ''Single
+
+    isDBRef (AppT c _)  =  isDBRef c
+    isDBRef t           =  t == ConT ''DBRef
+
+    isSpec (ConT t) | t == ''DBSpec = True
+    isSpec _                        = False
+
+    mapname = nameBase name'
+
+    cnt0 = st_cnt st
+
+    (cnt', mkref) =
+        case typ of
+            _ | isMulti  typ -> (succ $ cnt0, Just [| Multi  mapname (Just (cnt0)) |])
+            _ | isSingle typ -> (succ $ cnt0, Just [| Single mapname (Just (cnt0)) |])
+            _ | isDBRef  typ -> (cnt0, Just [| DBRef  (Char8.pack mapname) (Just 0) |])
+            _                -> (cnt0, Nothing)
+
+data DatabaseMacroState = DatabaseMacroState
+    { st_decls :: [Q [Dec]]
+    , st_cnt :: Int
+    , st_spec :: Maybe Name
+    }
+
+gen :: Dec -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroState -> Q [Dec]
+gen (SigD name typ) r st =
+    case arrowType typ of
+        Nothing   -> passThrough
+        Just typ' ->
+            case isTable typ' of
+                Nothing -> passThrough
+                Just tblcon -> doReturn $ do
+                    reftyp <- [t| IORef (Map String $(return typ')) |]
+                    -- Here we handle the case: xxx :: String -> Multi fl key val
+                    (++) <$> declareName reftyp
+                                         [| newIORef Map.empty |]
+                                         tblname
+                         <*> ( fmap (([SigD name' typ]++) . (:[]))
+                                $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
  where
 
-    genPlain name' typ = maybe (return [SigD name' typ])
-                               (flip (declareName typ) name')
-                               mkref
-     where
-        isMulti (AppT c _)  =  isMulti c
-        isMulti t           =  t == ConT ''Multi
+    doReturn decl = r (st { st_decls = decl : st_decls st })
 
-        isSingle (AppT c _)  =  isSingle c
-        isSingle t           =  t == ConT ''Single
+    passThrough = genPlain name' typ r st
 
-        isDBRef (AppT c _)  =  isDBRef c
-        isDBRef t           =  t == ConT ''DBRef
+    tblname = mkName $ "__" ++ nameBase name' ++ "_map"
 
-        mapname = nameBase name'
+    arrowType (AppT (AppT ArrowT (ConT str)) typ) | str==''String  =  Just typ
+    arrowType _                                                    =  Nothing
 
-        mkref =
-            case typ of
-                _ | isMulti  typ -> Just [| Multi  mapname <$> newTVarIO NotStarted |]
-                _ | isSingle typ -> Just [| Single mapname <$> newTVarIO NotStarted |]
-                _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) <$> newTVarIO NotStarted |]
-                _                -> Nothing
+    name' = mkName $ nameBase name
 
-    gen (SigD name typ) =
-        case arrowType typ of
-            Nothing   -> passThrough
-            Just typ' ->
-                case isTable typ' of
-                    Nothing -> passThrough
-                    Just tblcon -> do
-                        reftyp <- [t| IORef (Map String $(return typ')) |]
-                        -- Here we handle the case: xxx :: String -> Multi fl key val
-                        (++) <$> declareName reftyp
-                                             [| newIORef Map.empty |]
-                                             tblname
-                             <*> ( fmap (([SigD name' typ]++) . (:[]))
-                                    $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
+    vname = mkName "str"
 
-     where
-        passThrough = genPlain name' typ
+    fbody multi =
+             [| unsafePerformIO $ do
+                m <- readIORef $(varE tblname)
+                case Map.lookup $(varE vname) m of
+                    Just tbl -> return tbl
+                    Nothing  -> do
+                        tbl <- return $ $multi ( $(liftString $ nameBase name') ++ "_" ++ $(varE vname)) Nothing -- TODO
+                        writeIORef $(varE tblname) (Map.insert $(varE vname) tbl m)
+                        return tbl
+             |]
 
-        tblname = mkName $ "__" ++ nameBase name' ++ "_map"
+-- alternate: ValD (VarP version2_1627446612)
+--                 (NormalB (SigE (ConE GHC.Tuple.())
+--                                   (AppT (ConT DBRef) (ConT UTF8String))))
+--                 []
+gen (ValD (VarP name) (NormalB (SigE (ConE unit) typ)) []) r st | unit=='()  = gen (SigD name typ) r st
+gen (ValD (VarP name) (NormalB (SigE (VarE x)    typ)) []) r st | x=='xxx    = gen (SigD name typ) r st
 
-        arrowType (AppT (AppT ArrowT (ConT str)) typ) | str==''String  =  Just typ
-        arrowType _                                                    =  Nothing
+-- delete: ValD (VarP public_bindings_1627455154) (NormalB (ConE GHC.Tuple.())) []
+gen (ValD _ (NormalB (ConE unit)) []) r st | unit=='()  = r st -- delete fake = () bindings
+gen (ValD _ (NormalB (ConE x   )) []) r st | x=='xxx    = r st -- delete fake = () bindings
 
-        isTable (AppT c _) = isTable c
-        isTable t | t==ConT ''Multi = Just (conE 'Multi)
-        isTable t | t==ConT ''Single = Just (conE 'Single)
-        isTable _ = Nothing
+gen x r st = trace ("pass-through: "++show x) $
+                r (st { st_decls = return [x] : st_decls st }) -- pass through anything else
 
-        name' = mkName $ nameBase name
-
-        vname = mkName "str"
-
-        fbody multi =
-                 [| unsafePerformIO $ do
-                    m <- readIORef $(varE tblname)
-                    case Map.lookup $(varE vname) m of
-                        Just tbl -> return tbl
-                        Nothing  -> do
-                            tbl <- $multi ( $(liftString $ nameBase name') ++ "_" ++ $(varE vname)) <$> newTVarIO NotStarted
-                            writeIORef $(varE tblname) (Map.insert $(varE vname) tbl m)
-                            return tbl
-                 |]
-
-    -- alternate: ValD (VarP version2_1627446612)
-    --                 (NormalB (SigE (ConE GHC.Tuple.())
-    --                                   (AppT (ConT DBRef) (ConT UTF8String))))
-    --                 []
-    gen (ValD (VarP name) (NormalB (SigE (ConE unit) typ)) []) | unit=='()  = gen (SigD name typ)
-    gen (ValD (VarP name) (NormalB (SigE (VarE x)    typ)) []) | x=='xxx    = gen (SigD name typ)
-
-    -- delete: ValD (VarP public_bindings_1627455154) (NormalB (ConE GHC.Tuple.())) []
-    gen (ValD _ (NormalB (ConE unit)) []) | unit=='()  = return [] -- delete fake = () bindings
-    gen (ValD _ (NormalB (ConE x   )) []) | x=='xxx    = return [] -- delete fake = () bindings
-
-    gen x = trace ("pass-through: "++show x) $ return [x] -- pass through anything else
+data DBSpec = DBSpec
+    { dbSlotCount :: Int
+    , dbInitTables :: FilePath -> MDB_env -> IO (Array Int MDB_dbi)
+    }

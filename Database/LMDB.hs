@@ -57,8 +57,6 @@ module Database.LMDB
     -- key.  For each hashed key, a list of triples of the form (serialized
     -- key, 32-bit value length, serialized value) is stored which allows the
     -- implementation to account for hash collisions.
-    , initSingle
-    , testSingle
     , store
     , unstore
     , fetch
@@ -83,8 +81,6 @@ module Database.LMDB
     -- The 'HashedKey' flavor is implemented, on disk, exactly like a 'Single'
     -- 'HashedKey' table.  The difference is that 'insert' and 'remove' will
     -- allow multiple values per key.
-    , initMulti
-    , testMulti
     , insert
     , remove
     , fetchByPrefixMultiple
@@ -207,6 +203,7 @@ import System.FilePath
 import System.Directory
 import Control.Concurrent (myThreadId, ThreadId(..))
 import Database.LMDB.Raw
+import Data.Array
 import Data.ByteString.Internal
 import qualified Data.ByteString.Char8 as S
 import Foreign.ForeignPtr hiding (addForeignPtrFinalizer)
@@ -1086,6 +1083,7 @@ data DB a = DB
 data DBParams = DBParams
     { dbtime :: TimeStamp
     , dbRNG :: MVar RNG
+    , dbTbls :: Array Int MDB_dbi
     }
 
 dbRequiresWrite :: DB a -> Bool
@@ -1248,8 +1246,13 @@ withMDB_ bs action = do
 -- > database [d| myref = xxx :: DBRef Bool |]
 --
 readDBRef :: Binary a => DBRef a -> DB a
-readDBRef (DBRef keyname dbivar) = DB 0 $ \_ txn -> do
-    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+readDBRef (DBRef keyname mdbi) = DB 0 $ \DBParams { dbTbls = tbls } txn -> do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    case mdbi of
+        Nothing -> return $ Left $ dbError "readDBRef" "TODO: implement non-static refs"
+        Just dbi -> op txn (tbls ! dbi)
+ where
+  op txn dbi =
     maybe (Left $ dbError "readDBRef" "bad reference")
           Right
        <$> withMDB keyname decodeStrict (mdb_get txn dbi)
@@ -1260,8 +1263,13 @@ readDBRef (DBRef keyname dbivar) = DB 0 $ \_ txn -> do
 -- 'DBRef' entry will be created in the database.  See 'readDBRef' for how to
 -- declare a 'DBRef' variable for use with this function.
 writeDBRef :: Binary a => DBRef a -> a -> DB ()
-writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
-    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+writeDBRef (DBRef keyname mdbi) val = DB 1 $ \DBParams { dbTbls = tbls } txn -> do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    case mdbi of
+        Nothing -> return $ Left $ dbError "writeDBRef" "TODO: implement non-static refs"
+        Just dbi -> op txn (tbls ! dbi)
+ where
+  op txn dbi = do
     let flags  = compileWriteFlags [] -- TODO: ?
     _ <- withMDB_ keyname $ \key -> do
         let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
@@ -1273,19 +1281,30 @@ writeDBRef (DBRef keyname dbivar) val = DB 1 $ \_ txn -> do
 -- | Lookup a value from a given key using a table created by 'initSingle'.
 -- The transaction will fail if the key does not exist in the table.
 fetch :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v -> k -> DB v
-fetch (Single dbname dbivar) k =
+fetch (Single dbname mdbi) k =
     case flavor (Proxy :: Proxy f) of
-        BoundedKey      -> DB 0 $ \_ txn -> _bounded txn
-        BoundedKeyValue -> DB 0 $ \_ txn -> _bounded txn
-        HashedKey       -> DB 0 $ \_ txn -> _hashed txn
+        BoundedKey      -> DB 0 _bounded
+        BoundedKeyValue -> DB 0 _bounded
+        HashedKey       -> DB 0 _hashed
  where
-    _bounded txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+    _bounded DBParams { dbTbls = tbls } txn = do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+            maybe (return $ Left $ dbError "fetch" "TODO: implement non-static Single tables")
+                  (\dbi -> op txn (tbls ! dbi))
+                  mdbi
+     where
+       op txn dbi =
             maybe (Left $ dbError "fetch" "key not found")
                   Right
                <$> withMDB (encodeStrict k) decodeStrict (mdb_get txn dbi)
-    _hashed txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+
+    _hashed DBParams { dbTbls = tbls } txn = do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+            maybe (return $ Left $ dbError "fetch" "TODO: implement non-static Single tables")
+                  (\dbi -> op txn (tbls ! dbi))
+                  mdbi
+     where
+       op txn dbi = do
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
             mb <- with w $ \pw -> do
@@ -1326,20 +1345,30 @@ unstore (Single dbname dbivar) k =
 
 _del_bounded ::
     (Binary k, Eq k) =>
-    MapName -> TVar (Pending MDB_dbi) -> k -> Maybe MDB_val -> [MDB_DbFlag]
-        -> DBParams -> MDB_txn -> IO (Either a1 ())
-_del_bounded dbname dbivar k mbval flags _ txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
+    MapName -> Maybe Int -> k -> Maybe MDB_val -> [MDB_DbFlag]
+        -> DBParams -> MDB_txn -> IO (Either LMDB_Error ())
+_del_bounded dbname mdbi k mbval flags DBParams { dbTbls = tbls } txn = do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
+    maybe (return $ Left $ dbError "unstore/remove" "TODO: implement non-static tables")
+          (\dbi -> op txn (tbls ! dbi))
+          mdbi
+  where
+    op txn dbi = do
             _ <- withMDB_ (encodeStrict k) $ \key -> do
                     mdb_del txn dbi key mbval
             return $ Right ()
 
 _del_hashed ::
     (Binary k, Eq k) =>
-    MapName -> TVar (Pending MDB_dbi) -> k -> Maybe S.ByteString
-        -> DBParams -> MDB_txn -> IO (Either a ())
-_del_hashed dbname dbivar k mbval _ txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+    MapName -> Maybe Int -> k -> Maybe S.ByteString
+        -> DBParams -> MDB_txn -> IO (Either LMDB_Error ())
+_del_hashed dbname mdbi k mbval DBParams { dbTbls = tbls } txn = do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+    maybe (return $ Left $ dbError "unstore/remove" "TODO: implement non-static tables")
+          (\dbi -> op txn (tbls ! dbi))
+          mdbi
+ where
+    op txn dbi = do
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
             with w $ \pw -> do
@@ -1367,14 +1396,19 @@ _del_hashed dbname dbivar k mbval _ txn = do
 -- be overwritten.  See 'initSingle' for how to declare a table of type
 -- 'Single'.
 store :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Single f k v -> k -> v -> DB ()
-store (Single dbname dbivar) k val =
+store (Single dbname mdbi) k val =
     case flavor (Proxy :: Proxy f) of
-        BoundedKey      -> DB 1 $ \_ txn -> _bounded txn
-        BoundedKeyValue -> DB 1 $ \_ txn -> _bounded txn
-        HashedKey       -> DB 1 $ \_ txn -> _hashed txn
+        BoundedKey      -> DB 1 _bounded
+        BoundedKeyValue -> DB 1 _bounded
+        HashedKey       -> DB 1 _hashed
  where
-    _bounded txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+    _bounded DBParams { dbTbls = tbls } txn = do
+        -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+        case mdbi of
+            Nothing -> return $ Left $ dbError "store" "TODO: implement non-static refs"
+            Just dbi -> op txn (tbls ! dbi)
+      where
+       op txn dbi = do
             let flags  = compileWriteFlags [] -- TODO: ?
             _ <- withMDB_ (encodeStrict k) $ \key -> do
                 let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
@@ -1383,8 +1417,13 @@ store (Single dbname dbivar) k val =
                     mdb_put flags txn dbi key valmdb
             return $ Right ()
 
-    _hashed txn = do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+    _hashed DBParams { dbTbls = tbls } txn = do
+        -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+        case mdbi of
+            Nothing -> return $ Left $ dbError "store" "TODO: implement non-static refs"
+            Just dbi -> op txn (tbls ! dbi)
+      where
+        op txn dbi = do
             let flags  = compileWriteFlags [] -- TODO: ?
                 encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
@@ -1406,16 +1445,26 @@ store (Single dbname dbivar) k val =
 -- the transaction when the key has no associations in the table.  Instead, it
 -- returns an empty list.
 fetchMultiple :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> DB [v]
-fetchMultiple (Multi dbname dbivar) k =
+fetchMultiple (Multi dbname mdbi) k =
     case flavor (Proxy :: Proxy f) of
-        BoundedKeyValue -> DB 0 $ \_ txn -> dupsortFetch dbname dbivar txn k
-        BoundedKey ->  DB 0 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+        BoundedKeyValue -> DB 0 $ \DBParams { dbTbls = tbls } txn -> dupsortFetch dbname tbls mdbi txn k
+        BoundedKey ->  DB 0 $ \DBParams { dbTbls = tbls } txn -> do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+            case mdbi of
+                Nothing -> return $ Left $ dbError "fetchMultiple" "TODO: implement non-static refs"
+                Just dbi -> op txn (tbls ! dbi)
+          where
+           op txn dbi = do
             maybe (Right [])
                   Right
                <$> withMDB (encodeStrict k) (runGet getMany . L.fromChunks . (:[]) ) (mdb_get txn dbi)
-        HashedKey -> DB 0 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+        HashedKey -> DB 0 $ \DBParams { dbTbls = tbls } txn -> do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+            case mdbi of
+                Nothing -> return $ Left $ dbError "fetchMultiple" "TODO: implement non-static refs"
+                Just dbi -> op txn (tbls ! dbi)
+          where
+           op txn dbi = do
             let encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
             vs <- with w $ \pw -> do
@@ -1424,17 +1473,23 @@ fetchMultiple (Multi dbname dbivar) k =
                 return $ maybeToList mbs >>= runGet (findManyForKey k) . L.fromChunks . (:[])
             return $ Right vs
 
-dupsortFetch :: forall k v. (Eq k, Binary k, Binary v) => MapName -> TVar (Pending MDB_dbi) -> MDB_txn -> k -> IO (Either LMDB_Error [v])
-dupsortFetch dbname dbivar txn k = do
-    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) [MDB_DUPSORT]
-    let encodedKey = encode k
+dupsortFetch :: forall k v. (Eq k, Binary k, Binary v) => MapName -> Array Int MDB_dbi -> Maybe Int -> MDB_txn -> k -> IO (Either LMDB_Error [v])
+dupsortFetch dbname tbls mdbi txn k = do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) [MDB_DUPSORT]
+    case mdbi of
+        Nothing -> return $ Left $ dbError "fetchMultiple" "TODO: implement non-static refs"
+        Just dbi -> op txn (tbls ! dbi)
+ where
+    op txn dbi = do
+     let
+        encodedKey = encode k
         (fptr,offset,len) = S.toForeignPtr $ S.concat $ L.toChunks encodedKey
-    withForeignPtr fptr $ \ptr -> do
+     withForeignPtr fptr $ \ptr -> do
         cursor <- mdb_cursor_open txn dbi
         alloca $ \pkey -> alloca $ \pval -> do
             poke pkey $ MDB_val (fromIntegral len) (ptr `plusPtr` offset)
             Right <$> findMatch encodedKey cursor pkey pval MDB_FIRST_DUP
- where
+
     decodeValue fvp vlen =
         -- TODO: should be using 'unsafePackCStringLen' here.
         Just $ decodeStrict $ S.fromForeignPtr fvp 0 (fromIntegral vlen)
@@ -1462,10 +1517,15 @@ dupsortFetch dbname dbivar txn k = do
 -- of the single-map 'store'.  There is currently no multi-map equevelent for
 -- 'unstore'.  TODO: implement a method for removing items from a multi-map.
 insert :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> v -> DB ()
-insert (Multi dbname dbivar) k val =
+insert (Multi dbname mdbi) k val =
     case flavor (Proxy :: Proxy f) of
-        BoundedKey ->  DB 1 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+        BoundedKey ->  DB 1 $ \DBParams { dbTbls = tbls } txn -> do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+            case mdbi of
+                Nothing -> return $ Left $ dbError "insert" "TODO: implement non-static refs"
+                Just dbi -> op txn (tbls ! dbi)
+         where
+          op txn dbi = do
             withMDB_ (encodeStrict k) $ \key -> do
                 mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
                 let xbs :: [(v,L.ByteString)]
@@ -1480,8 +1540,13 @@ insert (Multi dbname dbivar) k val =
                         void $ mdb_put (compileWriteFlags []) txn dbi key valmdb
             return $ Right ()
 
-        BoundedKeyValue -> DB 1 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) [MDB_DUPSORT]
+        BoundedKeyValue ->  DB 1 $ \DBParams { dbTbls = tbls } txn -> do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) [MDB_DUPSORT]
+            case mdbi of
+                Nothing -> return $ Left $ dbError "insert" "TODO: implement non-static refs"
+                Just dbi -> op txn (tbls ! dbi)
+         where
+          op txn dbi = do
             let flags  = compileWriteFlags [] -- TODO: ?
             _ <- withMDB_ (encodeStrict k) $ \key -> do
                 let (fptr,offset,len) = S.toForeignPtr $ encodeStrict val
@@ -1490,8 +1555,13 @@ insert (Multi dbname dbivar) k val =
                     mdb_put flags txn dbi key valmdb
             return $ Right ()
 
-        HashedKey -> DB 1 $ \_ txn -> do
-            dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+        HashedKey ->  DB 1 $ \DBParams { dbTbls = tbls } txn -> do
+            -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+            case mdbi of
+                Nothing -> return $ Left $ dbError "insert" "TODO: implement non-static refs"
+                Just dbi -> op txn (tbls ! dbi)
+         where
+          op txn dbi = do
             let flags  = compileWriteFlags [] -- TODO: ?
                 encodedKey = encode k
                 w = Murmur.asWord64 $ Murmur.hash64 encodedKey
@@ -1514,12 +1584,17 @@ insert (Multi dbname dbivar) k val =
 -- If 'Nothing' is specified for the value, then all values associated with the
 -- given key will be removed.  Otherwise, only matching values will be removed.
 remove :: forall f k v. (Eq k, Binary k, Binary v, FlavorKind f) => Multi f k v -> k -> Maybe v -> DB ()
-remove (Multi dbname dbivar) k mbval =
+remove (Multi dbname mdbi) k mbval =
     case flavor (Proxy :: Proxy f) of
         BoundedKey      -> case mbval of
-            Nothing  -> DB 1 $ _del_bounded dbname dbivar k Nothing []
+            Nothing  -> DB 1 $ _del_bounded dbname mdbi k Nothing []
             Just val -> DB 1 $ \params txn -> do
-                dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+                -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) []
+                case mdbi of
+                    Nothing -> return $ Left $ dbError "remove" "TODO: implement non-static refs"
+                    Just dbi -> op params txn (dbTbls params ! dbi)
+             where
+              op params txn dbi = do
                 withMDB_ (encodeStrict k) $ \key -> do
                     mbs <- mdb_get txn dbi key >>= traverse (fmap (L.fromChunks . (:[])) . buildByteString)
                     let xbs :: [(v,L.ByteString)]
@@ -1527,21 +1602,22 @@ remove (Multi dbname dbivar) k mbval =
                         encoded = encode val
                         keepers = filter (\(_,storedv) -> storedv/=encoded) xbs
                     case keepers of
-                        [] -> _del_bounded dbname dbivar k Nothing [] params txn
+                        [] -> _del_bounded dbname mdbi k Nothing [] params txn
                         ks -> withMDB_ (L.toStrict $ L.concat $ map snd ks) $ \valmdb -> do
                                 void $ mdb_put (compileWriteFlags []) txn dbi key valmdb
                                 return $ Right ()
 
         BoundedKeyValue -> case mbval of
-            Nothing  -> DB 1 $ _del_bounded dbname dbivar k Nothing [MDB_DUPSORT]
+            Nothing  -> DB 1 $ _del_bounded dbname mdbi k Nothing [MDB_DUPSORT]
             Just val -> DB 1 $ \params txn -> do
                 withMDB_ (encodeStrict val) $ \valmdb -> do
-                    _del_bounded dbname dbivar k (Just valmdb) [MDB_DUPSORT] params txn
+                    _del_bounded dbname mdbi k (Just valmdb) [MDB_DUPSORT] params txn
 
         HashedKey       -> case mbval of
-            Nothing  -> DB 1 $ _del_hashed dbname dbivar k Nothing
-            Just val -> DB 1 $ _del_hashed dbname dbivar k (Just $ encodeStrict val)
+            Nothing  -> DB 1 $ _del_hashed dbname mdbi k Nothing
+            Just val -> DB 1 $ _del_hashed dbname mdbi k (Just $ encodeStrict val)
 
+#if 0
 -- | Create an empty multi-map table.  Use the 'database' template-haskell
 -- macro to declare a table like so:
 --
@@ -1604,6 +1680,7 @@ testSingle (Single dbname dbivar) = DB 1 $ \_ txn -> do
     _ <- performAtomicIO dbivar $ mdb_dbi_open txn (Just $ dbname) flags
     return $ Right ()
 
+#endif
 
 
 -- don't export
@@ -1613,12 +1690,12 @@ mdbTry action = handle (return . Left)
 
 
 -- | An opague type representing an open database.
-data DBEnv = DBEnv DBS (MVar RNG)
+data DBEnv = DBEnv DBS (MVar RNG) (Array Int MDB_dbi)
 
 -- | Use this to ignore database layout and insert and lookup
 --   arbitrary byte strings with 'insertKey\'' and 'lookupVal\''
 unsafeGetDBS :: DBEnv -> IO DBS
-unsafeGetDBS (DBEnv dbs _) = return dbs
+unsafeGetDBS (DBEnv dbs _ _) = return dbs
 
 -- | Open a database.  The current design is limited in that data represented
 -- by 'DBRef', 'Single', and 'Multi' are assumed to be associated with only a
@@ -1632,9 +1709,9 @@ unsafeGetDBS (DBEnv dbs _) = return dbs
 --
 -- Note that it is neccessary to invoke 'closeDBEnv' to flush writes and
 -- clean-up when you are finished with the database.
-openDBEnv :: FilePath -> Maybe FilePath -> IO DBEnv
-openDBEnv path mbnoise = do
-        dbsEnv <-
+openDBEnv :: DBSpec -> FilePath -> Maybe FilePath -> IO DBEnv
+openDBEnv spec path mbnoise = do
+        dbs <-
           initDBSOptions
             -- path to lmdb environment
             path
@@ -1645,18 +1722,18 @@ openDBEnv path mbnoise = do
             -- LDMB is designed to support a small handful of databases.
             -- i choose 12 (arbitarily) as maxdbs
             -- The vcache package uses 5
-            (Just 12)
+            (Just $ dbSlotCount spec + 1)
             -- LMDB Environment flags
             []
 
         g <- makeGen mbnoise
         gv <- newMVar g
-        return $ DBEnv dbsEnv gv
-
+        tvars <- dbInitTables spec path (dbsEnv dbs)
+        return $ DBEnv dbs gv tvars
 
 -- | Close a database.
 closeDBEnv :: DBEnv -> IO ()
-closeDBEnv (DBEnv (DBS env dir emvar) _) = do
+closeDBEnv (DBEnv (DBS env dir emvar) _ _) = do
     open <- takeMVar emvar
     if open
         then do
@@ -1684,7 +1761,7 @@ runDB env action = tryDB env Left Right action
 --  fmap).
 --
 tryDB :: (NFData a, Data a) => DBEnv -> (LMDB_Error -> x) -> (a -> x) -> DB a -> IO x
-tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
+tryDB (DBEnv (DBS env _ _) gv tbls) onError onSuccess db_action = do
     etxn <- mdbTry $ mdb_txn_begin env Nothing (not $ dbRequiresWrite db_action)
     either (return . onError) (withTxn gv) etxn
  where
@@ -1694,7 +1771,7 @@ tryDB (DBEnv (DBS env _ _) gv) onError onSuccess db_action = do
                     else return $ error "BUG: unknown transaction time!"
         fin <- newIORef (const $ return ())
         ei <- handle (return . Left)
-                     (dbOperation db_action (DBParams { dbtime=stamp, dbRNG=gv }) txn)
+                     (dbOperation db_action (DBParams { dbtime=stamp, dbRNG=gv, dbTbls=tbls }) txn)
         result <- either (return . onError) (fmap onSuccess . copyByteStrings) ei
         either (const $ mdb_txn_abort) (const $ mdb_txn_commit) ei txn
         readIORef fin >>= ($ either Just (const Nothing) ei)
@@ -1789,14 +1866,24 @@ dblift action = DB 0 $ \_ _ -> fmap Right action
 -- 'initSingle'.  The given 'S.ByteString' is a common prefix of the serialized
 -- keys whose values are of interest.
 fetchByPrefix :: forall f k v. (Eq k, Binary k, Binary v) => Single 'BoundedKey k v -> S.ByteString -> DB [(k,v)]
-fetchByPrefix (Single dbname dbivar) start  = DB 0 $ \_ txn -> do
-    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+fetchByPrefix (Single dbname mdbi) start  = DB 0 $ \DBParams { dbTbls = tbls } txn -> do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    case mdbi of
+        Nothing -> return $ Left $ dbError "fetchByPrefix" "TODO: implement non-static refs"
+        Just dbi -> op txn (tbls ! dbi)
+ where
+   op txn dbi =
     fmap (fmap (map $ decodeStrict *** decodeStrict)) $ getRange txn dbi start
 
 -- | This is the multi-map equivelent of 'fetchByPrefix'.
 fetchByPrefixMultiple :: forall f k v. (Eq k, Binary k, Binary v) => Multi 'BoundedKey k v -> S.ByteString -> DB [(k,v)]
-fetchByPrefixMultiple (Multi dbname dbivar) start  = DB 0 $ \_ txn -> do
-    dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+fetchByPrefixMultiple (Multi dbname mdbi) start  = DB 0 $ \DBParams { dbTbls = tbls } txn -> do
+    -- dbi <- performAtomicIO dbivar $ mdb_dbi_open txn Nothing []
+    case mdbi of
+        Nothing -> return $ Left $ dbError "fetchByPrefixMultiple" "TODO: implement non-static refs"
+        Just dbi -> op txn (tbls ! dbi)
+ where
+  op txn dbi =
     fmap (fmap (concatMap (\(k,v) -> map ((,) $ decodeStrict k) $ runGet getMany $ L.fromChunks [v])))
         $ getRange txn dbi start
 

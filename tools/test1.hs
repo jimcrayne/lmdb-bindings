@@ -7,6 +7,8 @@ import System.Directory ( createDirectoryIfMissing )
 
 database [d|
 
+    test1spec = xxx :: DBSpec
+
     refA = xxx :: DBRef Bool
 
     singleB = xxx :: Single 'BoundedKey Int String
@@ -27,14 +29,16 @@ dbpath = "test1.db"
 main = do
     currentTime >>= writeFile noisefile . show
     createDirectoryIfMissing True dbpath
-    env <- openDBEnv dbpath (Just noisefile)
+    env <- openDBEnv test1spec dbpath (Just noisefile)
     putStrLn $ "opened "++ dbpath
     forkIO $ do
         e <- runDB env $ do
+                {-
                 dbtrace "started transaction"
                 initSingle singleB
                 dbtrace "finished initSingle"
                 initMulti multiC
+                -}
                 writeDBRef refA True
                 store singleB 5 "foo"
                 insert multiC 6 "bar"
