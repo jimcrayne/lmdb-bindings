@@ -39,6 +39,7 @@
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE QuasiQuotes         #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveLift #-}
 module Database.LMDB.Macros
     ( database
     , DBSpec(..)
@@ -63,7 +64,7 @@ import Data.IORef
 import System.IO.Unsafe
 import Database.LMDB.Raw.Types
 import Language.Haskell.TH
-import Language.Haskell.TH.Syntax (liftString)
+import Language.Haskell.TH.Syntax (liftString,Lift)
 import Control.Applicative
 import qualified Data.ByteString.Char8 as Char8
 import Data.Global.Internal
@@ -103,6 +104,7 @@ data DBFlavor
     | BoundedKey -- ^ keys are limited to a hardcoded maximum (probably 511 bytes, see LMDB's max_key_size() )
     | BoundedKeyValue -- ^ both keys and values are limited to hardcoded maximum
                       -- (probably 511 bytes, see LMDB's max_key_size() )
+ deriving Lift
 
 #if !MIN_VERSION_base(4,7,0)
 data Proxy (f :: DBFlavor) = Proxy
@@ -240,22 +242,21 @@ database qsigs = do
         { st_decls = []
         , st_cnt = 1
         , st_spec = Nothing
-        , st_singles = []
-        , st_multis = []
+        , st_tbls = []
         }
 
 declareSpec :: DatabaseMacroState -> Q [Dec]
 declareSpec st = do
-    decls <- concat <$> sequence (st_decls st)
+    decls <- concat <$> sequence (reverse $ st_decls st)
     fromMaybe (return decls) $ do
         n <- st_spec st
         return $ do
-            let DatabaseMacroState { st_cnt     = cnt
-                                   , st_singles = ss
-                                   , st_multis  = ms } = st
+            let DatabaseMacroState { st_cnt  = cnt
+                                   , st_tbls = ts0 } = st
+                ts = reverse ts0
             spec <- [| DBSpec { dbSlotCount = cnt
-                              , dbSingles   = ss
-                              , dbMultis    = ms} |]
+                              , dbTables = ts
+                              } |]
             return $ [ SigD n (ConT ''DBSpec)
                      , ValD (VarP n) (NormalB spec) []
                      ] ++ decls
@@ -297,13 +298,19 @@ genPlain name' typ r st =
 
     cnt0 = st_cnt st
 
+    -- AppT (AppT (AppT (ConT Single) (PromotedT BoundedKey)) (ConT Int)) (ConT String)
+    flvr (AppT (AppT (AppT _ (PromotedT n)) _) _)
+        | "BoundedKey" <- nameBase n      = BoundedKey
+        | "BoundedKeyValue" <- nameBase n = BoundedKeyValue
+        | "HashedKey" <- nameBase n       = HashedKey
+
     (st', mkref) =
         case typ of
             _ | isMulti  typ -> ( st { st_cnt    = succ $ cnt0
-                                     , st_multis = mapname : st_multis st }
+                                     , st_tbls = (mapname,True,flvr typ) : st_tbls st }
                                 , Just [| Multi  mapname (Just (cnt0)) |])
             _ | isSingle typ -> ( st { st_cnt     = succ $ cnt0
-                                     , st_singles = mapname : st_singles st }
+                                     , st_tbls = (mapname,False,flvr typ) : st_tbls st }
                                 , Just [| Single mapname (Just (cnt0)) |])
             _ | isDBRef  typ -> (st, Just [| DBRef  (Char8.pack mapname) (Just 0) |])
             _                -> (st, Nothing)
@@ -312,8 +319,7 @@ data DatabaseMacroState = DatabaseMacroState
     { st_decls :: [Q [Dec]]
     , st_cnt :: Int
     , st_spec :: Maybe Name
-    , st_singles :: [MapName]
-    , st_multis :: [MapName]
+    , st_tbls :: [(MapName,Bool,DBFlavor)]
     }
 
 gen :: Dec -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroState -> Q [Dec]
@@ -373,6 +379,5 @@ gen x r st = trace ("pass-through: "++show x) $
 
 data DBSpec = DBSpec
     { dbSlotCount :: Int
-    , dbSingles :: [MapName]
-    , dbMultis :: [MapName]
+    , dbTables :: [(MapName,Bool,DBFlavor)]
     }

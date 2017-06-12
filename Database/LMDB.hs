@@ -1733,13 +1733,14 @@ openDBEnv spec path mbnoise = do
 
 dbInitTables :: DBSpec -> FilePath -> MDB_env -> IO (Array Int MDB_dbi)
 dbInitTables spec path env = do
-    dbi0 <- error "todo: open Nothing table for DBRefs"
-    ss <- forM (dbSingles spec) $ \tbl -> do
-        -- For each single
-        error "open single"
-    ms <- forM (dbMultis spec) $ \tbl -> do
-        error "open double"
-    error "todo: create array" (dbi0 : ss ++ ms)
+    txn <- mdb_txn_begin env Nothing False
+    dbi0 <- mdb_dbi_open txn Nothing []
+    ss <- forM (dbTables spec) $ \(tbl,isMulti,flvr) -> do
+        case flvr of
+            BoundedKeyValue | isMulti -> mdb_dbi_open txn (Just tbl) [MDB_DUPSORT]
+            _                         -> mdb_dbi_open txn (Just tbl) []
+    mdb_txn_commit txn
+    return $ listArray (0, dbSlotCount spec - 1) (dbi0 : ss)
 
 
 -- | Close a database.
