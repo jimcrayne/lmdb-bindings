@@ -1732,13 +1732,13 @@ openDBEnv spec path mbnoise = do
         return $ DBEnv dbs gv tvars
 
 dbInitTables :: DBSpec -> FilePath -> MDB_env -> IO (Array Int MDB_dbi)
-dbInitTables spec path env = do
+dbInitTables spec _ env = do
     txn <- mdb_txn_begin env Nothing False
-    dbi0 <- mdb_dbi_open txn Nothing []
+    dbi0 <- mdb_dbi_open txn Nothing [MDB_CREATE]
     ss <- forM (dbTables spec) $ \(tbl,isMulti,flvr) -> do
         case flvr of
-            BoundedKeyValue | isMulti -> mdb_dbi_open txn (Just tbl) [MDB_DUPSORT]
-            _                         -> mdb_dbi_open txn (Just tbl) []
+            BoundedKeyValue | isMulti -> mdb_dbi_open txn (Just tbl) [MDB_DUPSORT,MDB_CREATE]
+            _                         -> mdb_dbi_open txn (Just tbl) [MDB_CREATE]
     mdb_txn_commit txn
     return $ listArray (0, dbSlotCount spec - 1) (dbi0 : ss)
 
