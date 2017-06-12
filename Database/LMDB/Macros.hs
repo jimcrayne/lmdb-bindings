@@ -240,6 +240,8 @@ database qsigs = do
         { st_decls = []
         , st_cnt = 1
         , st_spec = Nothing
+        , st_singles = []
+        , st_multis = []
         }
 
 declareSpec :: DatabaseMacroState -> Q [Dec]
@@ -248,8 +250,12 @@ declareSpec st = do
     fromMaybe (return decls) $ do
         n <- st_spec st
         return $ do
-            let cnt = st_cnt st
-            spec <- [| DBSpec { dbSlotCount = cnt } |]
+            let DatabaseMacroState { st_cnt     = cnt
+                                   , st_singles = ss
+                                   , st_multis  = ms } = st
+            spec <- [| DBSpec { dbSlotCount = cnt
+                              , dbSingles   = ss
+                              , dbMultis    = ms} |]
             return $ [ SigD n (ConT ''DBSpec)
                      , ValD (VarP n) (NormalB spec) []
                      ] ++ decls
@@ -265,8 +271,7 @@ genPlain :: Name -> Type -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroStat
 genPlain name' typ r st =
     if isSpec typ
         then r (st { st_spec = Just name' })
-        else r (st { st_decls = decl : st_decls st
-                   , st_cnt = cnt' })
+        else r (st' { st_decls = decl : st_decls st })
  where
     decl = maybe (return [SigD name' typ])
                  (\body -> do
@@ -292,17 +297,23 @@ genPlain name' typ r st =
 
     cnt0 = st_cnt st
 
-    (cnt', mkref) =
+    (st', mkref) =
         case typ of
-            _ | isMulti  typ -> (succ $ cnt0, Just [| Multi  mapname (Just (cnt0)) |])
-            _ | isSingle typ -> (succ $ cnt0, Just [| Single mapname (Just (cnt0)) |])
-            _ | isDBRef  typ -> (cnt0, Just [| DBRef  (Char8.pack mapname) (Just 0) |])
-            _                -> (cnt0, Nothing)
+            _ | isMulti  typ -> ( st { st_cnt    = succ $ cnt0
+                                     , st_multis = mapname : st_multis st }
+                                , Just [| Multi  mapname (Just (cnt0)) |])
+            _ | isSingle typ -> ( st { st_cnt     = succ $ cnt0
+                                     , st_singles = mapname : st_singles st }
+                                , Just [| Single mapname (Just (cnt0)) |])
+            _ | isDBRef  typ -> (st, Just [| DBRef  (Char8.pack mapname) (Just 0) |])
+            _                -> (st, Nothing)
 
 data DatabaseMacroState = DatabaseMacroState
     { st_decls :: [Q [Dec]]
     , st_cnt :: Int
     , st_spec :: Maybe Name
+    , st_singles :: [MapName]
+    , st_multis :: [MapName]
     }
 
 gen :: Dec -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroState -> Q [Dec]
@@ -362,5 +373,6 @@ gen x r st = trace ("pass-through: "++show x) $
 
 data DBSpec = DBSpec
     { dbSlotCount :: Int
-    , dbInitTables :: FilePath -> MDB_env -> IO (Array Int MDB_dbi)
+    , dbSingles :: [MapName]
+    , dbMultis :: [MapName]
     }
