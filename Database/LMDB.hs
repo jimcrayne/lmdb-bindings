@@ -1731,6 +1731,17 @@ openDBEnv spec path mbnoise = do
         tvars <- dbInitTables spec path (dbsEnv dbs)
         return $ DBEnv dbs gv tvars
 
+dbInitTables :: DBSpec -> FilePath -> MDB_env -> IO (Array Int MDB_dbi)
+dbInitTables spec path env = do
+    dbi0 <- error "todo: open Nothing table for DBRefs"
+    ss <- forM (dbSingles spec) $ \tbl -> do
+        -- For each single
+        error "open single"
+    ms <- forM (dbMultis spec) $ \tbl -> do
+        error "open double"
+    error "todo: create array" (dbi0 : ss ++ ms)
+
+
 -- | Close a database.
 closeDBEnv :: DBEnv -> IO ()
 closeDBEnv (DBEnv (DBS env dir emvar) _ _) = do
