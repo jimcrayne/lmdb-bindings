@@ -7,6 +7,8 @@ import System.Directory ( createDirectoryIfMissing )
 
 database [d|
 
+    test1spec = xxx :: DBSpec
+
     refA = xxx :: DBRef Bool
 
     singleB = xxx :: Single 'BoundedKey Int String
@@ -27,7 +29,7 @@ dbpath = "test1.db"
 main = do
     currentTime >>= writeFile noisefile . show
     createDirectoryIfMissing True dbpath
-    env <- openDBEnv (error "todo DBSpec") dbpath (Just noisefile)
+    env <- openDBEnv test1spec dbpath (Just noisefile)
     putStrLn $ "opened "++ dbpath
     forkIO $ do
         e <- runDB env $ do

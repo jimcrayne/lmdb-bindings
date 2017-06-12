@@ -236,7 +236,23 @@ xxx = error "xxx placeholder wasn't replaced by the database macro!"
 database :: Q [Dec] -> Q [Dec]
 database qsigs = do
     sigs <- qsigs
-    concat <$> sequence (map (\s-> gen s 0) sigs) -- :: Q [Dec]
+    foldr gen declareSpec sigs DatabaseMacroState
+        { st_decls = []
+        , st_cnt = 1
+        , st_spec = Nothing
+        }
+
+declareSpec :: DatabaseMacroState -> Q [Dec]
+declareSpec st = do
+    decls <- concat <$> sequence (st_decls st)
+    fromMaybe (return decls) $ do
+        n <- st_spec st
+        return $ do
+            let cnt = st_cnt st
+            spec <- [| DBSpec { dbSlotCount = cnt } |]
+            return $ [ SigD n (ConT ''DBSpec)
+                     , ValD (VarP n) (NormalB spec) []
+                     ] ++ decls
 
 isTable :: Type -> Maybe ExpQ
 isTable (AppT c _) = isTable c
@@ -245,15 +261,21 @@ isTable t | t==ConT ''Single = Just (conE 'Single)
 isTable _ = Nothing
 
 
-genPlain :: Name -> Type -> Int -> Q [Dec]
-genPlain name' typ cnt = maybe (return [SigD name' typ])
-                               (\body -> do
-                                    bdy <- body
-                                    return [ SigD name' typ
-                                           , ValD (VarP name') (NormalB bdy) []
-                                           ])
-                               mkref
+genPlain :: Name -> Type -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroState -> Q [Dec]
+genPlain name' typ r st =
+    if isSpec typ
+        then r (st { st_spec = Just name' })
+        else r (st { st_decls = decl : st_decls st
+                   , st_cnt = cnt' })
  where
+    decl = maybe (return [SigD name' typ])
+                 (\body -> do
+                    bdy <- body
+                    return [ SigD name' typ
+                           , ValD (VarP name') (NormalB bdy) []
+                           ])
+                 mkref
+
     isMulti (AppT c _)  =  isMulti c
     isMulti t           =  t == ConT ''Multi
 
@@ -263,23 +285,34 @@ genPlain name' typ cnt = maybe (return [SigD name' typ])
     isDBRef (AppT c _)  =  isDBRef c
     isDBRef t           =  t == ConT ''DBRef
 
+    isSpec (ConT t) | t == ''DBSpec = True
+    isSpec _                        = False
+
     mapname = nameBase name'
 
-    mkref =
-        case typ of
-            _ | isMulti  typ -> Just [| Multi  mapname (Just cnt) |]
-            _ | isSingle typ -> Just [| Single mapname (Just cnt) |]
-            _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) (Just 0) |]
-            _                -> Nothing
+    cnt0 = st_cnt st
 
-gen :: Dec -> Int -> Q [Dec]
-gen (SigD name typ) cnt =
+    (cnt', mkref) =
+        case typ of
+            _ | isMulti  typ -> (succ $ cnt0, Just [| Multi  mapname (Just (cnt0)) |])
+            _ | isSingle typ -> (succ $ cnt0, Just [| Single mapname (Just (cnt0)) |])
+            _ | isDBRef  typ -> (cnt0, Just [| DBRef  (Char8.pack mapname) (Just 0) |])
+            _                -> (cnt0, Nothing)
+
+data DatabaseMacroState = DatabaseMacroState
+    { st_decls :: [Q [Dec]]
+    , st_cnt :: Int
+    , st_spec :: Maybe Name
+    }
+
+gen :: Dec -> (DatabaseMacroState -> Q [Dec]) -> DatabaseMacroState -> Q [Dec]
+gen (SigD name typ) r st =
     case arrowType typ of
         Nothing   -> passThrough
         Just typ' ->
             case isTable typ' of
                 Nothing -> passThrough
-                Just tblcon -> do
+                Just tblcon -> doReturn $ do
                     reftyp <- [t| IORef (Map String $(return typ')) |]
                     -- Here we handle the case: xxx :: String -> Multi fl key val
                     (++) <$> declareName reftyp
@@ -287,9 +320,11 @@ gen (SigD name typ) cnt =
                                          tblname
                          <*> ( fmap (([SigD name' typ]++) . (:[]))
                                 $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
-
  where
-    passThrough = genPlain name' typ cnt
+
+    doReturn decl = r (st { st_decls = decl : st_decls st })
+
+    passThrough = genPlain name' typ r st
 
     tblname = mkName $ "__" ++ nameBase name' ++ "_map"
 
@@ -315,14 +350,15 @@ gen (SigD name typ) cnt =
 --                 (NormalB (SigE (ConE GHC.Tuple.())
 --                                   (AppT (ConT DBRef) (ConT UTF8String))))
 --                 []
-gen (ValD (VarP name) (NormalB (SigE (ConE unit) typ)) []) cnt | unit=='()  = gen (SigD name typ) cnt
-gen (ValD (VarP name) (NormalB (SigE (VarE x)    typ)) []) cnt | x=='xxx    = gen (SigD name typ) cnt
+gen (ValD (VarP name) (NormalB (SigE (ConE unit) typ)) []) r st | unit=='()  = gen (SigD name typ) r st
+gen (ValD (VarP name) (NormalB (SigE (VarE x)    typ)) []) r st | x=='xxx    = gen (SigD name typ) r st
 
 -- delete: ValD (VarP public_bindings_1627455154) (NormalB (ConE GHC.Tuple.())) []
-gen (ValD _ (NormalB (ConE unit)) []) cnt | unit=='()  = return [] -- delete fake = () bindings
-gen (ValD _ (NormalB (ConE x   )) []) cnt | x=='xxx    = return [] -- delete fake = () bindings
+gen (ValD _ (NormalB (ConE unit)) []) r st | unit=='()  = r st -- delete fake = () bindings
+gen (ValD _ (NormalB (ConE x   )) []) r st | x=='xxx    = r st -- delete fake = () bindings
 
-gen x cnt = trace ("pass-through: "++show x) $ return [x] -- pass through anything else
+gen x r st = trace ("pass-through: "++show x) $
+                r (st { st_decls = return [x] : st_decls st }) -- pass through anything else
 
 data DBSpec = DBSpec
     { dbSlotCount :: Int
