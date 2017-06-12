@@ -41,6 +41,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Database.LMDB.Macros
     ( database
+    , DBSpec(..)
     , xxx
     , DBRef(..)
     , KeyName
@@ -72,7 +73,8 @@ import Control.Concurrent.STM.TVar
 import Data.Typeable
 import Debug.Trace
 import Control.Exception
-
+import Data.Array
+import Database.LMDB.Raw
 
 #if 0
 -- tables = xxx :: String -> Multi 'BoundedKeyValue Int Int
@@ -173,12 +175,12 @@ tryAtomicIO var action = do
 -- | A persistent mutable reference that refers to a value within an LMDB
 -- database.  Although the constructor is exported, it is preferred that you
 -- use the 'database' macro to instantiate this type.
-data DBRef t = DBRef KeyName (TVar (Pending MDB_dbi))
+data DBRef t = DBRef KeyName (Maybe Int)
 
 -- | A persistent lookup-table implemented as a table within an LMDB database.
 -- Although the constructor is exported, it is preferred that you use the
 -- 'database' macro to instantiate this type.
-data Single (f :: DBFlavor) k v = Single MapName (TVar (Pending MDB_dbi))
+data Single (f :: DBFlavor) k v = Single MapName (Maybe Int)
 
 -- | A persistent lookup-table implemented as a table within an LMDB database.
 -- This is similar to 'Single' except that multiple values may be associated
@@ -188,7 +190,7 @@ data Single (f :: DBFlavor) k v = Single MapName (TVar (Pending MDB_dbi))
 -- The current implementation has no advantage over 'Single' unless the
 -- 'BoundedKeyValue' flavor is used.  In that case, the table will be
 -- implemented as a DUPSORT table in the LMDB database.
-data Multi (f :: DBFlavor) k v  = Multi MapName (TVar (Pending MDB_dbi))
+data Multi (f :: DBFlavor) k v  = Multi MapName (Maybe Int)
 
 
 -- | Use this interface to resolve a type-level 'DBFlavor' into a run-time
@@ -234,83 +236,95 @@ xxx = error "xxx placeholder wasn't replaced by the database macro!"
 database :: Q [Dec] -> Q [Dec]
 database qsigs = do
     sigs <- qsigs
-    concat <$> sequence (map gen sigs) -- :: Q [Dec]
- where
+    concat <$> sequence (map (\s-> gen s 0) sigs) -- :: Q [Dec]
 
-    genPlain name' typ = maybe (return [SigD name' typ])
-                               (flip (declareName typ) name')
+isTable :: Type -> Maybe ExpQ
+isTable (AppT c _) = isTable c
+isTable t | t==ConT ''Multi = Just (conE 'Multi)
+isTable t | t==ConT ''Single = Just (conE 'Single)
+isTable _ = Nothing
+
+
+genPlain :: Name -> Type -> Int -> Q [Dec]
+genPlain name' typ cnt = maybe (return [SigD name' typ])
+                               (\body -> do
+                                    bdy <- body
+                                    return [ SigD name' typ
+                                           , ValD (VarP name') (NormalB bdy) []
+                                           ])
                                mkref
-     where
-        isMulti (AppT c _)  =  isMulti c
-        isMulti t           =  t == ConT ''Multi
+ where
+    isMulti (AppT c _)  =  isMulti c
+    isMulti t           =  t == ConT ''Multi
 
-        isSingle (AppT c _)  =  isSingle c
-        isSingle t           =  t == ConT ''Single
+    isSingle (AppT c _)  =  isSingle c
+    isSingle t           =  t == ConT ''Single
 
-        isDBRef (AppT c _)  =  isDBRef c
-        isDBRef t           =  t == ConT ''DBRef
+    isDBRef (AppT c _)  =  isDBRef c
+    isDBRef t           =  t == ConT ''DBRef
 
-        mapname = nameBase name'
+    mapname = nameBase name'
 
-        mkref =
-            case typ of
-                _ | isMulti  typ -> Just [| Multi  mapname <$> newTVarIO NotStarted |]
-                _ | isSingle typ -> Just [| Single mapname <$> newTVarIO NotStarted |]
-                _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) <$> newTVarIO NotStarted |]
-                _                -> Nothing
+    mkref =
+        case typ of
+            _ | isMulti  typ -> Just [| Multi  mapname (Just cnt) |]
+            _ | isSingle typ -> Just [| Single mapname (Just cnt) |]
+            _ | isDBRef  typ -> Just [| DBRef  (Char8.pack mapname) (Just 0) |]
+            _                -> Nothing
 
-    gen (SigD name typ) =
-        case arrowType typ of
-            Nothing   -> passThrough
-            Just typ' ->
-                case isTable typ' of
-                    Nothing -> passThrough
-                    Just tblcon -> do
-                        reftyp <- [t| IORef (Map String $(return typ')) |]
-                        -- Here we handle the case: xxx :: String -> Multi fl key val
-                        (++) <$> declareName reftyp
-                                             [| newIORef Map.empty |]
-                                             tblname
-                             <*> ( fmap (([SigD name' typ]++) . (:[]))
-                                    $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
+gen :: Dec -> Int -> Q [Dec]
+gen (SigD name typ) cnt =
+    case arrowType typ of
+        Nothing   -> passThrough
+        Just typ' ->
+            case isTable typ' of
+                Nothing -> passThrough
+                Just tblcon -> do
+                    reftyp <- [t| IORef (Map String $(return typ')) |]
+                    -- Here we handle the case: xxx :: String -> Multi fl key val
+                    (++) <$> declareName reftyp
+                                         [| newIORef Map.empty |]
+                                         tblname
+                         <*> ( fmap (([SigD name' typ]++) . (:[]))
+                                $ funD name' [clause [varP vname] (normalB $ fbody tblcon) []] )
 
-     where
-        passThrough = genPlain name' typ
+ where
+    passThrough = genPlain name' typ cnt
 
-        tblname = mkName $ "__" ++ nameBase name' ++ "_map"
+    tblname = mkName $ "__" ++ nameBase name' ++ "_map"
 
-        arrowType (AppT (AppT ArrowT (ConT str)) typ) | str==''String  =  Just typ
-        arrowType _                                                    =  Nothing
+    arrowType (AppT (AppT ArrowT (ConT str)) typ) | str==''String  =  Just typ
+    arrowType _                                                    =  Nothing
 
-        isTable (AppT c _) = isTable c
-        isTable t | t==ConT ''Multi = Just (conE 'Multi)
-        isTable t | t==ConT ''Single = Just (conE 'Single)
-        isTable _ = Nothing
+    name' = mkName $ nameBase name
 
-        name' = mkName $ nameBase name
+    vname = mkName "str"
 
-        vname = mkName "str"
+    fbody multi =
+             [| unsafePerformIO $ do
+                m <- readIORef $(varE tblname)
+                case Map.lookup $(varE vname) m of
+                    Just tbl -> return tbl
+                    Nothing  -> do
+                        tbl <- return $ $multi ( $(liftString $ nameBase name') ++ "_" ++ $(varE vname)) Nothing -- TODO
+                        writeIORef $(varE tblname) (Map.insert $(varE vname) tbl m)
+                        return tbl
+             |]
 
-        fbody multi =
-                 [| unsafePerformIO $ do
-                    m <- readIORef $(varE tblname)
-                    case Map.lookup $(varE vname) m of
-                        Just tbl -> return tbl
-                        Nothing  -> do
-                            tbl <- $multi ( $(liftString $ nameBase name') ++ "_" ++ $(varE vname)) <$> newTVarIO NotStarted
-                            writeIORef $(varE tblname) (Map.insert $(varE vname) tbl m)
-                            return tbl
-                 |]
+-- alternate: ValD (VarP version2_1627446612)
+--                 (NormalB (SigE (ConE GHC.Tuple.())
+--                                   (AppT (ConT DBRef) (ConT UTF8String))))
+--                 []
+gen (ValD (VarP name) (NormalB (SigE (ConE unit) typ)) []) cnt | unit=='()  = gen (SigD name typ) cnt
+gen (ValD (VarP name) (NormalB (SigE (VarE x)    typ)) []) cnt | x=='xxx    = gen (SigD name typ) cnt
 
-    -- alternate: ValD (VarP version2_1627446612)
-    --                 (NormalB (SigE (ConE GHC.Tuple.())
-    --                                   (AppT (ConT DBRef) (ConT UTF8String))))
-    --                 []
-    gen (ValD (VarP name) (NormalB (SigE (ConE unit) typ)) []) | unit=='()  = gen (SigD name typ)
-    gen (ValD (VarP name) (NormalB (SigE (VarE x)    typ)) []) | x=='xxx    = gen (SigD name typ)
+-- delete: ValD (VarP public_bindings_1627455154) (NormalB (ConE GHC.Tuple.())) []
+gen (ValD _ (NormalB (ConE unit)) []) cnt | unit=='()  = return [] -- delete fake = () bindings
+gen (ValD _ (NormalB (ConE x   )) []) cnt | x=='xxx    = return [] -- delete fake = () bindings
 
-    -- delete: ValD (VarP public_bindings_1627455154) (NormalB (ConE GHC.Tuple.())) []
-    gen (ValD _ (NormalB (ConE unit)) []) | unit=='()  = return [] -- delete fake = () bindings
-    gen (ValD _ (NormalB (ConE x   )) []) | x=='xxx    = return [] -- delete fake = () bindings
+gen x cnt = trace ("pass-through: "++show x) $ return [x] -- pass through anything else
 
-    gen x = trace ("pass-through: "++show x) $ return [x] -- pass through anything else
+data DBSpec = DBSpec
+    { dbSlotCount :: Int
+    , dbInitTables :: FilePath -> MDB_env -> IO (Array Int MDB_dbi)
+    }
