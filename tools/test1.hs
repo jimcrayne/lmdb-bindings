@@ -42,7 +42,7 @@ main = do
                 writeDBRef refA True
                 store singleB 5 "foo"
                 insert multiC 6 "bar"
-                dblift $ threadDelay 1000000 -- delay transaction commit for 1 second
+                --dblift $ threadDelay 1000000 -- delay transaction commit for 1 second
         print ("ready to use dbi", e)
 
     threadDelay 250000 -- 1/4 second

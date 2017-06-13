@@ -39,7 +39,7 @@
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE QuasiQuotes         #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE DeriveLift #-}
+-- {-# LANGUAGE DeriveLift #-}
 module Database.LMDB.Macros
     ( database
     , DBSpec(..)
@@ -104,7 +104,7 @@ data DBFlavor
     | BoundedKey -- ^ keys are limited to a hardcoded maximum (probably 511 bytes, see LMDB's max_key_size() )
     | BoundedKeyValue -- ^ both keys and values are limited to hardcoded maximum
                       -- (probably 511 bytes, see LMDB's max_key_size() )
- deriving Lift
+ deriving (Show,Eq,Enum,Ord) --deriving Lift
 
 #if !MIN_VERSION_base(4,7,0)
 data Proxy (f :: DBFlavor) = Proxy
@@ -245,6 +245,13 @@ database qsigs = do
         , st_tbls = []
         }
 
+liftTables :: [ (MapName,Bool,DBFlavor) ] -> Q Exp
+liftTables ts = foldr consE [| [] |] (map liftTup ts) --error "todo"
+ where
+    liftTup (n,b,f) = let fn = fromEnum f in [| (n,b,toEnum fn) |]
+    consE x xs = [| $x : $xs |]
+
+
 declareSpec :: DatabaseMacroState -> Q [Dec]
 declareSpec st = do
     decls <- concat <$> sequence (reverse $ st_decls st)
@@ -255,7 +262,7 @@ declareSpec st = do
                                    , st_tbls = ts0 } = st
                 ts = reverse ts0
             spec <- [| DBSpec { dbSlotCount = cnt
-                              , dbTables = ts
+                              , dbTables = $(liftTables ts)
                               } |]
             return $ [ SigD n (ConT ''DBSpec)
                      , ValD (VarP n) (NormalB spec) []
